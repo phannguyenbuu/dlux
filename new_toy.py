@@ -865,6 +865,8 @@ def compute_scene(svg_path: Path, snap: float) -> Dict:
 
     packed_polys: List[List[Tuple[float, float]]] = []
     packed_colors: List[str] = []
+    packed_bleed_polys: List[List[Tuple[float, float]]] = []
+    packed_bleed_colors: List[str] = []
     region_colors: List[str] = []
     packed_labels: Dict[str, Dict[str, float]] = {}
     packed_zone_polys: List[List[Tuple[float, float]]] = []
@@ -909,6 +911,20 @@ def compute_scene(svg_path: Path, snap: float) -> Dict:
         packed = [(p[0] + dx, p[1] + dy) for p in _rotate_pts(pts, ang, cx, cy)]
         packed_polys.append(packed)
         packed_colors.append(region_colors[rid])
+        if PACK_BLEED > 0:
+            poly = Polygon(packed)
+            if not poly.is_empty:
+                buff = poly.buffer(PACK_BLEED)
+                geoms = [buff] if buff.geom_type == "Polygon" else list(buff.geoms)
+                for g in geoms:
+                    if g.is_empty:
+                        continue
+                    coords = list(g.exterior.coords)
+                    if len(coords) > 1 and coords[0] == coords[-1]:
+                        coords = coords[:-1]
+                    if len(coords) >= 3:
+                        packed_bleed_polys.append([(float(x), float(y)) for x, y in coords])
+                        packed_bleed_colors.append(region_colors[rid])
 
     for zid in zone_geoms:
         if zid not in zone_shift:
@@ -934,6 +950,8 @@ def compute_scene(svg_path: Path, snap: float) -> Dict:
         "region_labels": region_labels,
         "packed_polys": packed_polys,
         "packed_colors": packed_colors,
+        "packed_bleed_polys": packed_bleed_polys,
+        "packed_bleed_colors": packed_bleed_colors,
         "packed_labels": packed_labels,
         "packed_zone_polys": packed_zone_polys,
         "region_colors": region_colors,

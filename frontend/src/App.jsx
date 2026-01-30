@@ -952,6 +952,21 @@ export default function App() {
                 </Layer>
                 <Layer>
                   {showImages && scene.packed_polys && scene.packed_colors
+                    ? scene.packed_bleed_polys && scene.packed_bleed_colors
+                      ? scene.packed_bleed_polys.map((poly, idx) => (
+                          <Line
+                            key={`pbf-${idx}`}
+                            points={toPoints(poly)}
+                            closed
+                            fill={scene.packed_bleed_colors[idx]}
+                            strokeScaleEnabled={false}
+                          />
+                        ))
+                      : null
+                    : null}
+                </Layer>
+                <Layer>
+                  {showImages && scene.packed_polys && scene.packed_colors
                     ? scene.packed_polys.map((poly, idx) => (
                         <Line
                           key={`pf-${idx}`}
