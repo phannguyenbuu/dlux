@@ -1,0 +1,3 @@
+zones_total=99
+placed=99
+missing=0
