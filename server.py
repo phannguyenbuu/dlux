@@ -38,7 +38,6 @@ def api_scene():
         ("pack_margin_x", "PACK_MARGIN_X"),
         ("pack_margin_y", "PACK_MARGIN_Y"),
         ("pack_bleed", "PACK_BLEED"),
-        ("draw_scale", "DRAW_SCALE"),
         ("pack_grid", "PACK_GRID_STEP"),
         ("pack_angle", "PACK_ANGLE_STEP"),
         ("pack_mode", "PACK_MODE"),
@@ -46,7 +45,7 @@ def api_scene():
         val = request.args.get(key)
         if val is not None:
             os.environ[env_key] = str(val)
-    data = new_toy.compute_scene(new_toy.SVG_PATH, snap, render_packed_png=True)
+    data = new_toy.compute_scene(new_toy.SVG_PATH, snap)
     return jsonify(data)
 
 
@@ -62,7 +61,6 @@ def api_render():
         ("pack_margin_x", "PACK_MARGIN_X"),
         ("pack_margin_y", "PACK_MARGIN_Y"),
         ("pack_bleed", "PACK_BLEED"),
-        ("draw_scale", "DRAW_SCALE"),
         ("pack_grid", "PACK_GRID_STEP"),
         ("pack_angle", "PACK_ANGLE_STEP"),
         ("pack_mode", "PACK_MODE"),

@@ -1,31 +1,7 @@
 import React, { useMemo, useRef, useState, useEffect } from "react";
-import { Stage, Layer, Line, Text, Circle, Image } from "react-konva";
+import { Stage, Layer, Line, Text, Circle, Rect } from "react-konva";
 
 const toPoints = (pts) => pts.flatMap((p) => [p[0], p[1]]);
-const rotatePt = (pt, angleDeg, cx, cy) => {
-  if (!angleDeg) return pt;
-  const ang = (angleDeg * Math.PI) / 180;
-  const c = Math.cos(ang);
-  const s = Math.sin(ang);
-  const x = pt[0] - cx;
-  const y = pt[1] - cy;
-  return [cx + x * c - y * s, cy + x * s + y * c];
-};
-
-const transformPath = (pts, shift, rot, center) => {
-  if (!pts || !pts.length) return [];
-  const dx = shift?.[0] ?? 0;
-  const dy = shift?.[1] ?? 0;
-  const ang = rot ?? 0;
-  const cx = center?.[0] ?? 0;
-  const cy = center?.[1] ?? 0;
-  return pts.map((p) => {
-    const r = rotatePt(p, ang, cx, cy);
-    return [r[0] + dx, r[1] + dy];
-  });
-};
-
-// packed zone boundaries are transformed on backend
 
 const parsePoints = (str) => {
   if (!str) return [];
@@ -348,9 +324,11 @@ export default function App() {
   const [zoneStageSize, setZoneStageSize] = useState({ w: 300, h: 200 });
   const [autoFit, setAutoFit] = useState(true);
   const [showImages, setShowImages] = useState(false);
-  const [packedImageSrc, setPackedImageSrc] = useState("/out/packed.png");
-  const [packedImage, setPackedImage] = useState(null);
-  const [packedImageError, setPackedImageError] = useState("");
+  const [zoneLoading, setZoneLoading] = useState(false);
+  const [packedLoading, setPackedLoading] = useState(false);
+  const [zoneSrc, setZoneSrc] = useState("/out/zone_outline.svg");
+  const [packedSrc, setPackedSrc] = useState("/out/packed.svg");
+  const [zoneRetry, setZoneRetry] = useState(false);
   const [edgeMode, setEdgeMode] = useState(false);
   const [edgeCandidate, setEdgeCandidate] = useState(null);
   const [sceneLoading, setSceneLoading] = useState(true);
@@ -358,7 +336,6 @@ export default function App() {
   const [packMarginX, setPackMarginX] = useState(30);
   const [packMarginY, setPackMarginY] = useState(30);
   const [packBleed, setPackBleed] = useState(10);
-  const [drawScale, setDrawScale] = useState(0.5);
   const [packGrid, setPackGrid] = useState(5);
   const [packAngle, setPackAngle] = useState(5);
   const [packMode, setPackMode] = useState("fast");
@@ -506,17 +483,13 @@ export default function App() {
       setSegs(snapped.segs);
 
       const res = await fetch(
-        `/api/scene?snap=${snap}&pack_padding=${packPadding}&pack_margin_x=${packMarginX}&pack_margin_y=${packMarginY}&pack_bleed=${packBleed}&draw_scale=${drawScale}&pack_grid=${packGrid}&pack_angle=${packAngle}&pack_mode=${packMode}`
+        `/api/scene?snap=${snap}&pack_padding=${packPadding}&pack_margin_x=${packMarginX}&pack_margin_y=${packMarginY}&pack_bleed=${packBleed}&pack_grid=${packGrid}&pack_angle=${packAngle}&pack_mode=${packMode}`
       );
       if (!res.ok) {
         throw new Error(`scene fetch failed: ${res.status}`);
       }
       const data = await res.json();
       setScene(data);
-      if (typeof data.draw_scale === "number") {
-        setDrawScale(data.draw_scale);
-      }
-      setPackedImageSrc(`/out/packed.png?t=${Date.now()}`);
       const initLabels = Object.values(data.zone_labels || {}).map((v) => ({
         id: `z-${v.label}`,
         x: v.x,
@@ -535,11 +508,14 @@ export default function App() {
           x: (viewW - w * fitScale) / 2,
           y: (viewH - h * fitScale) / 2,
         });
-        if (data.canvas) {
-          fitRegionToView({ minx: 0, miny: 0, maxx: data.canvas.w, maxy: data.canvas.h });
-        } else {
-          fitRegionToView(calcBounds(data.regions || []));
-        }
+        const packedBounds = calcBounds(
+          data.packed_zone_polys && data.packed_zone_polys.length
+            ? data.packed_zone_polys
+            : data.packed_polys && data.packed_polys.length
+            ? data.packed_polys
+            : data.regions || []
+        );
+        fitRegionToView(packedBounds);
         const regionBounds = calcBounds(data.regions || []);
         fitRegion2ToView(regionBounds);
         const zoneBounds = calcBoundsFromLines(data.zone_boundaries);
@@ -691,31 +667,35 @@ export default function App() {
   };
 
   const renderPNGs = async () => {
-    await loadScene(false);
+    setZoneLoading(true);
+    setPackedLoading(true);
+    setZoneRetry(false);
+    await fetch("/api/render", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        snap,
+        pack_padding: packPadding,
+        pack_margin_x: packMarginX,
+        pack_margin_y: packMarginY,
+        pack_bleed: packBleed,
+        pack_grid: packGrid,
+        pack_angle: packAngle,
+        pack_mode: packMode,
+      }),
+    });
+    const ts = Date.now();
+    setZoneSrc(`${showImages ? "/out/zone.svg" : "/out/zone_outline.svg"}?t=${ts}`);
+    setPackedSrc(`${showImages ? "/out/packed.svg" : "/out/packed_outline.png"}?t=${ts}`);
   };
 
   useEffect(() => {
     if (!autoPack) return;
     const id = setTimeout(() => {
-      loadScene(false);
+      renderPNGs().then(() => loadScene(false));
     }, 500);
     return () => clearTimeout(id);
   }, [packPadding, packMarginX, packMarginY, packBleed, packGrid, packAngle, packMode, autoPack]);
-
-  useEffect(() => {
-    if (!packedImageSrc) return;
-    const img = new window.Image();
-    img.onload = () => {
-      setPackedImage(img);
-      setPackedImageError("");
-    };
-    img.onerror = () => {
-      setPackedImage(null);
-      setPackedImageError("packed.png failed to load");
-    };
-    img.crossOrigin = "anonymous";
-    img.src = packedImageSrc;
-  }, [packedImageSrc]);
 
   const nodeLayer = useMemo(() => {
     if (!segs.length || !nodes.length) return null;
@@ -748,12 +728,15 @@ export default function App() {
   }, [borderSegments]);
 
   useEffect(() => {
-    if (autoFit && (scene?.canvas || scene?.regions?.length)) {
-      if (scene?.canvas) {
-        fitRegionToView({ minx: 0, miny: 0, maxx: scene.canvas.w, maxy: scene.canvas.h });
-      } else {
-        fitRegionToView(calcBounds(scene.regions || []));
-      }
+    if (autoFit && (scene?.packed_polys?.length || scene?.regions?.length)) {
+      const packedBounds = calcBounds(
+        scene.packed_zone_polys && scene.packed_zone_polys.length
+          ? scene.packed_zone_polys
+          : scene.packed_polys && scene.packed_polys.length
+          ? scene.packed_polys
+          : scene.regions
+      );
+      fitRegionToView(packedBounds);
       fitRegion2ToView(calcBounds(scene.regions || []));
       fitZoneToView(calcBoundsFromLines(scene.zone_boundaries));
     }
@@ -762,25 +745,74 @@ export default function App() {
 
   return (
     <div className="app">
-      <div className="content">
-        <div className="column-left">
-          <div className="panel toolbar">
-            <button onClick={loadScene}>Load</button>
-            <button onClick={renderPNGs}>Render PNGs</button>
-            <button
-              className={edgeMode ? "active" : ""}
-              onClick={() => {
-                setEdgeMode((v) => !v);
-                setEdgeCandidate(null);
+      <div className="panel toolbar">
+        <label>Snap</label>
+        <input
+          value={snap}
+          onChange={(e) => setSnap(parseFloat(e.target.value || "0"))}
+          type="number"
+          step="0.1"
+        />
+        <button onClick={loadScene}>Load</button>
+          <label className="checkbox">
+            <input
+              type="checkbox"
+              checked={showImages}
+              onChange={(e) => {
+                setShowImages(e.target.checked);
+                setZoneLoading(true);
+                setPackedLoading(true);
+                setZoneRetry(false);
+                const ts = Date.now();
+                setZoneSrc(`${e.target.checked ? "/out/zone.svg" : "/out/zone_outline.svg"}?t=${ts}`);
+                setPackedSrc(`${e.target.checked ? "/out/packed.svg" : "/out/packed_outline.png"}?t=${ts}`);
               }}
-            >
-              Create Edge
-            </button>
-            <div className="toolbar-spacer" />
-            {error ? <div className="error">{error}</div> : null}
-          </div>
+          />
+          Image
+        </label>
+        <button onClick={renderPNGs}>Render PNGs</button>
+        <button onClick={saveState}>Save JSON+SVG</button>
+        <button
+          className={edgeMode ? "active" : ""}
+          onClick={() => {
+            setEdgeMode((v) => !v);
+            setEdgeCandidate(null);
+          }}
+        >
+          Create Edge
+        </button>
+        <label>Pad</label>
+        <input type="number" step="0.5" value={packPadding} onChange={(e) => setPackPadding(parseFloat(e.target.value || "0"))} />
+        <label>MX</label>
+        <input type="number" step="1" value={packMarginX} onChange={(e) => setPackMarginX(parseFloat(e.target.value || "0"))} />
+        <label>MY</label>
+        <input type="number" step="1" value={packMarginY} onChange={(e) => setPackMarginY(parseFloat(e.target.value || "0"))} />
+        <label>Bleed</label>
+        <input type="number" step="1" value={packBleed} onChange={(e) => setPackBleed(parseFloat(e.target.value || "0"))} />
+        <label>Grid</label>
+        <input type="number" step="1" value={packGrid} onChange={(e) => setPackGrid(parseFloat(e.target.value || "0"))} />
+        <label>Angle</label>
+        <input type="number" step="1" value={packAngle} onChange={(e) => setPackAngle(parseFloat(e.target.value || "0"))} />
+        <label>Mode</label>
+        <select value={packMode} onChange={(e) => setPackMode(e.target.value)}>
+          <option value="fast">fast</option>
+          <option value="full">full</option>
+        </select>
+        <label className="checkbox">
+          <input
+            type="checkbox"
+            checked={autoPack}
+            onChange={(e) => setAutoPack(e.target.checked)}
+          />
+          Auto pack
+        </label>
+        <button onClick={() => renderPNGs().then(() => loadScene(false))}>Apply Pack</button>
+        <div className="toolbar-spacer" />
+        {error ? <div className="error">{error}</div> : null}
+      </div>
 
-          <div className={`left ${sceneLoading ? "is-loading" : ""}`} ref={leftRef}>
+      <div className="content">
+        <div className={`left ${sceneLoading ? "is-loading" : ""}`} ref={leftRef}>
           <Stage
             width={stageSize.w}
             height={stageSize.h}
@@ -890,28 +922,9 @@ export default function App() {
             </div>
           </div>
         </div>
-        </div>
         <div className="right">
           <div className={`preview tall region-stage ${sceneLoading ? "is-loading" : ""}`} ref={regionWrapRef}>
-            <div className="preview-header">
-              <div className="preview-title">Packed (Konva)</div>
-              <div className="preview-controls">
-                <label className="mini-input">
-                  Scale
-                  <input
-                    type="number"
-                    lang="en"
-                    inputMode="decimal"
-                    step="0.05"
-                    value={drawScale}
-                    onChange={(e) => {
-                      const next = String(e.target.value || "").replace(",", ".");
-                      setDrawScale(parseFloat(next || "0"));
-                    }}
-                  />
-                </label>
-              </div>
-            </div>
+            <div className="preview-title">Packed (Konva)</div>
             {scene ? (
               <Stage
                 width={regionStageSize.w}
@@ -925,43 +938,61 @@ export default function App() {
                 ref={regionRef}
               >
                 <Layer>
-                  {packedImage && scene?.canvas ? (
-                    <Image
-                      image={packedImage}
+                  {scene?.canvas ? (
+                    <Rect
                       x={0}
                       y={0}
                       width={scene.canvas.w}
                       height={scene.canvas.h}
-                      listening={false}
+                      stroke="#f5f6ff"
+                      strokeWidth={1 / regionScale}
+                      strokeScaleEnabled={false}
                     />
                   ) : null}
                 </Layer>
                 <Layer>
-                  {Object.entries(scene.zone_boundaries || {}).flatMap(([zid, paths]) =>
-                    (paths || []).map((p, i) => {
-                      const shift = scene.zone_shift?.[zid] || scene.zone_shift?.[parseInt(zid, 10)];
-                      if (!shift) return null;
-                      const rot = scene.zone_rot?.[zid] ?? scene.zone_rot?.[parseInt(zid, 10)] ?? 0;
-                      const center =
-                        scene.zone_center?.[zid] || scene.zone_center?.[parseInt(zid, 10)] || [0, 0];
-                      const tpts = transformPath(p, shift, rot, center);
-                      return (
+                  {showImages && scene.packed_polys && scene.packed_colors
+                    ? scene.packed_bleed_polys && scene.packed_bleed_colors
+                      ? scene.packed_bleed_polys.map((poly, idx) => (
+                          <Line
+                            key={`pbf-${idx}`}
+                            points={toPoints(poly)}
+                            closed
+                            fill={scene.packed_bleed_colors[idx]}
+                            strokeScaleEnabled={false}
+                          />
+                        ))
+                      : null
+                    : null}
+                </Layer>
+                <Layer>
+                  {showImages && scene.packed_polys && scene.packed_colors
+                    ? scene.packed_polys.map((poly, idx) => (
                         <Line
-                          key={`pz-outline-${zid}-${i}`}
-                          points={toPoints(tpts)}
-                          stroke="#f5f6ff"
-                          strokeWidth={1 / regionScale}
+                          key={`pf-${idx}`}
+                          points={toPoints(poly)}
+                          closed
+                          fill={scene.packed_colors[idx]}
                           strokeScaleEnabled={false}
-                          listening={false}
                         />
-                      );
-                    })
-                  )}
+                      ))
+                    : null}
+                </Layer>
+                <Layer>
+                  {(scene.packed_zone_polys || []).map((poly, idx) => (
+                    <Line
+                      key={`pz-${idx}`}
+                      points={toPoints(poly)}
+                      closed
+                      stroke="#f5f6ff"
+                      strokeWidth={1 / regionScale}
+                      strokeScaleEnabled={false}
+                    />
+                  ))}
                 </Layer>
               </Stage>
               ) : null}
             {sceneLoading ? <div className="loading-overlay">Loading…</div> : null}
-            {packedImageError ? <div className="error">{packedImageError}</div> : null}
           </div>
           <div className="preview-row">
             <div className={`preview half ${sceneLoading ? "is-loading" : ""}`} ref={region2WrapRef}>
@@ -996,21 +1027,7 @@ export default function App() {
               {sceneLoading ? <div className="loading-overlay">Loading…</div> : null}
             </div>
             <div className={`preview half ${sceneLoading ? "is-loading" : ""}`} ref={zoneWrapRef}>
-              <div className="preview-header">
-                <div className="preview-title">Zone (Konva)</div>
-                <div className="preview-controls">
-                  <label className="checkbox">
-                    <input
-                      type="checkbox"
-                      checked={showImages}
-                      onChange={(e) => {
-                        setShowImages(e.target.checked);
-                      }}
-                    />
-                    Image
-                  </label>
-                </div>
-              </div>
+              <div className="preview-title">Zone (Konva)</div>
               {scene ? (
                 <Stage
                   width={zoneStageSize.w}
@@ -1048,22 +1065,6 @@ export default function App() {
                         />
                       ))
                     )}
-                  </Layer>
-                  <Layer>
-                    {Object.values(scene.zone_labels || {}).map((lbl) => (
-                      <Text
-                        key={`zl-${lbl.label}`}
-                        x={lbl.x}
-                        y={lbl.y}
-                        text={`${lbl.label}`}
-                        fill="#f5f6ff"
-                        fontSize={(scene?.pack_label_scale || 0.6) * 20 / zoneScale}
-                        align="center"
-                        verticalAlign="middle"
-                        offsetX={((scene?.pack_label_scale || 0.6) * 20) / zoneScale / 2}
-                        offsetY={((scene?.pack_label_scale || 0.6) * 20) / zoneScale / 2}
-                      />
-                    ))}
                   </Layer>
                 </Stage>
               ) : null}

@@ -19,19 +19,8 @@ body {
   display: flex;
   flex: 1;
   min-height: 0;
-  height: 100vh;
-  padding: 0;
+  padding: 14px;
   gap: 14px;
-}
-
-.column-left {
-  display: flex;
-  flex: 1;
-  min-width: 0;
-  flex-direction: column;
-  gap: 14px;
-  padding: 14px 0 14px 14px;
-  box-sizing: border-box;
 }
 
 .left {
@@ -51,9 +40,6 @@ body {
   flex-direction: column;
   min-width: 0;
   gap: 12px;
-  height: 100vh;
-  padding: 14px 14px 14px 0;
-  box-sizing: border-box;
 }
 
 .preview {
@@ -93,40 +79,6 @@ body {
   text-transform: uppercase;
   color: rgba(232, 235, 255, 0.7);
   margin: 32px 0 6px;
-}
-
-.preview-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-}
-
-.preview-header .preview-title {
-  margin: 32px 0 6px;
-}
-
-.preview-header .checkbox {
-  margin: 28px 0 6px;
-}
-
-.preview-controls {
-  display: inline-flex;
-  align-items: center;
-  gap: 12px;
-}
-
-.preview-controls .mini-input {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: rgba(232, 235, 255, 0.7);
-  margin: 28px 0 6px;
-}
-
-.preview-controls .mini-input input {
-  width: 70px;
 }
 
 .preview img {
@@ -182,10 +134,6 @@ body {
   gap: 12px;
   flex-wrap: nowrap;
   white-space: nowrap;
-}
-
-.panel.toolbar button {
-  width: 100px;
 }
 
 .toolbar-spacer {
