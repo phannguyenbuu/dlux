@@ -9,7 +9,6 @@ from typing import Dict, List, Tuple
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
 
-import cv2
 import numpy as np
 
 PACK_DEBUG_STATS: Dict[str, int] | None = None
@@ -17,7 +16,7 @@ from rectpack import newPacker
 import rectpack
 from rectpack import maxrects
 from shapely.affinity import rotate as _srotate, translate as _stranslate
-from shapely.geometry import Polygon
+from shapely.geometry import Polygon, Point
 from shapely.geometry.base import BaseGeometry
 from shapely.ops import unary_union
 
@@ -1014,14 +1013,64 @@ def pack_regions(
             gap_bottom_added = len(placed_bottom)
 
             # Compact right-gap placements leftwards to touch old zones.
-            for rid in placed_right:
-                dx, dy, bw, bh, rot = placements[rid]
-                info = rot_info[rid] if rid < len(rot_info) else {}
-                minx = float(info.get("minx", 0.0))
-                cur_x = dx + minx
-                shift = cur_x - base_max_x
-                if shift > 0:
-                    placements[rid] = (int(dx - shift), dy, bw, bh, rot)
+            if placed_right:
+                base_rects = _rects_for_ids(base_placed)
+
+                def _base_edge_x(y: float) -> float:
+                    max_x = None
+                    for x0, y0, x1, y1 in base_rects:
+                        if y < y0 or y > y1:
+                            continue
+                        if max_x is None or x1 > max_x:
+                            max_x = x1
+                    return max_x if max_x is not None else base_max_x
+
+                # For the first/last zone on right_path, use bottom-left/top-left only.
+                first_rid = None
+                first_y = None
+                last_rid = None
+                last_y = None
+                for rid in placed_right:
+                    dx, dy, bw, bh, _ = placements[rid]
+                    info = rot_info[rid] if rid < len(rot_info) else {}
+                    miny = float(info.get("miny", 0.0))
+                    y0 = dy + miny
+                    if first_y is None or y0 < first_y:
+                        first_y = y0
+                        first_rid = rid
+                    if last_y is None or y0 > last_y:
+                        last_y = y0
+                        last_rid = rid
+
+                for rid in placed_right:
+                    dx, dy, bw, bh, rot = placements[rid]
+                    info = rot_info[rid] if rid < len(rot_info) else {}
+                    minx = float(info.get("minx", 0.0))
+                    miny = float(info.get("miny", 0.0))
+                    cur_x = dx + minx
+                    cur_y = dy + miny
+                    # Use bottom-left only for first zone, top-left only for last zone,
+                    # and fallback to whichever edge exists if the other is missing.
+                    top_edge = _base_edge_x(cur_y)
+                    bot_edge = _base_edge_x(cur_y + bh)
+                    if first_rid is not None and rid == first_rid:
+                        target_edge = bot_edge
+                    elif last_rid is not None and rid == last_rid:
+                        target_edge = top_edge
+                    else:
+                        if top_edge is None:
+                            target_edge = bot_edge
+                        elif bot_edge is None:
+                            target_edge = top_edge
+                        else:
+                            target_edge = max(top_edge, bot_edge)
+                    if target_edge is None:
+                        continue
+                    # Align left edge of zone to right_path (top-left & bottom-left).
+                    target_x = float(target_edge)
+                    if cur_x > target_x:
+                        shift = cur_x - target_x
+                        placements[rid] = (int(dx - shift), dy, bw, bh, rot)
 
             # Compact bottom-gap placements upwards to touch old zones.
             for rid in placed_bottom:
@@ -1088,6 +1137,7 @@ def write_pack_log(
     polys: List[List[Tuple[float, float]]],
     placements: List[Tuple[int, int, int, int, bool]],
     rot_info: List[Dict[str, float]],
+    zone_label_map: Dict[int, int] | None,
     out_path,
     canvas: Tuple[int, int],
 ) -> None:
@@ -1115,8 +1165,10 @@ def write_pack_log(
             overflow += 1
         else:
             visible += 1
+        alias = zone_label_map.get(rid) if zone_label_map else None
+        alias_str = f" alias={alias}" if alias is not None else ""
         lines.append(
-            f"region={rid} dx={dx} dy={dy} x={x0:.2f} y={y0:.2f} w={bw} h={bh} rot={rot}"
+            f"region={rid} dx={dx} dy={dy} x={x0:.2f} y={y0:.2f} w={bw} h={bh} rot={rot}{alias_str}"
         )
     lines.append(f"packed_visible={visible} overflow={overflow}")
     lines.append(f"packed_placed={placed} packed_unplaced={unplaced} placed_area={placed_area} bin_area={int(w*h)}")
@@ -1146,6 +1198,7 @@ def write_pack_bbox_svg(
     used_max_x = 0.0
     used_max_y = 0.0
     base_max_x = None
+    base_rects: List[Tuple[float, float, float, float]] = []
     parts = [
         f'<svg xmlns="http://www.w3.org/2000/svg" width="{w}" height="{h}" viewBox="0 0 {w} {h}">',
         '<rect x="0" y="0" width="100%" height="100%" fill="none" stroke="#ffffff" stroke-width="1"/>',
@@ -1173,6 +1226,7 @@ def write_pack_bbox_svg(
         if int(info.get("base_bin", 0)) == 0:
             bx = x + bw
             base_max_x = bx if base_max_x is None else max(base_max_x, bx)
+            base_rects.append((x, y, x + bw, y + bh))
         if x + bw > 0 and y + bh > 0 and x < w and y < h:
             visible += 1
             used_max_x = max(used_max_x, x + bw)
@@ -1205,14 +1259,68 @@ def write_pack_bbox_svg(
     parts.append(
         f'<text x="6" y="14" fill="#ffffff" font-size="12">visible={visible}</text>'
     )
-    if base_max_x is not None:
-        parts.append(
-            f'<line x1="{base_max_x:.3f}" y1="0" x2="{base_max_x:.3f}" y2="{h:.3f}" '
-            f'stroke="#ff9800" stroke-width="1" stroke-dasharray="6,4"/>'
-        )
-        parts.append(
-            f'<text x="{base_max_x + 4:.3f}" y="{min(16, h-4):.3f}" fill="#ff9800" font-size="12">base_right_edge</text>'
-        )
+    if base_max_x is not None and base_rects:
+        step = 2
+        pts = []
+        last_x = None
+        min_x = None
+        y = 0
+        while y <= h:
+            max_x = None
+            for x0, y0, x1, y1 in base_rects:
+                if y < y0 or y > y1:
+                    continue
+                if max_x is None or x1 > max_x:
+                    max_x = x1
+            if max_x is None:
+                y += step
+                continue
+            last_x = max_x
+            min_x = max_x if min_x is None else min(min_x, max_x)
+            pts.append((max_x, y))
+            y += step
+        if pts:
+            d = "M " + " L ".join(f"{px:.3f} {py:.3f}" for px, py in pts)
+            parts.append(
+                f'<path d="{d}" fill="none" stroke="#ff9800" stroke-width="1" stroke-dasharray="6,4"/>'
+            )
+            parts.append(
+                f'<text x="{pts[0][0] + 4:.3f}" y="{min(16, h-4):.3f}" fill="#ff9800" font-size="12">base_right_edge</text>'
+            )
+        # Bottom edge polyline (scan along X).
+        pts_b = []
+        last_y = None
+        min_y = None
+        x = 0
+        while x <= w:
+            max_y = None
+            for x0, y0, x1, y1 in base_rects:
+                if x < x0 or x > x1:
+                    continue
+                if max_y is None or y1 > max_y:
+                    max_y = y1
+            if max_y is None:
+                if last_y is None:
+                    max_y = 0.0
+                else:
+                    max_y = last_y
+            else:
+                last_y = max_y
+            min_y = max_y if min_y is None else min(min_y, max_y)
+            pts_b.append((x, max_y))
+            x += step
+        if pts_b:
+            if min_y is not None:
+                pts_b[0] = (pts_b[0][0], min_y)
+                if len(pts_b) > 1:
+                    pts_b[1] = (pts_b[1][0], min_y)
+            d = "M " + " L ".join(f"{px:.3f} {py:.3f}" for px, py in pts_b)
+            parts.append(
+                f'<path d="{d}" fill="none" stroke="#ff9800" stroke-width="1" stroke-dasharray="6,4"/>'
+            )
+            parts.append(
+                f'<text x="{min(4, w-4):.3f}" y="{pts_b[0][1] + 14:.3f}" fill="#ff9800" font-size="12">base_bottom_edge</text>'
+            )
     parts.append("</g></svg>")
     out_path.write_text("".join(parts), encoding="utf-8")
 
@@ -1278,20 +1386,8 @@ def write_pack_bbox_vs_poly_svg(
 
 
 def build_bleed(group_mask: np.ndarray, canvas_fill: np.ndarray, border_thick: int) -> Tuple[np.ndarray, np.ndarray]:
-    if border_thick <= 0:
-        return group_mask, canvas_fill
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * border_thick + 1, 2 * border_thick + 1))
-    dilated = cv2.dilate(group_mask, kernel)
-    bleed = (dilated > 0).astype(np.uint8) * 255
-
-    canvas_mask = (group_mask > 0).astype(np.uint8) * 255
-    canvas_fill_masked = cv2.bitwise_and(canvas_fill, canvas_fill, mask=canvas_mask)
-    kernel2 = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (2 * border_thick + 1, 2 * border_thick + 1))
-    dilated_final = cv2.dilate(group_mask, kernel2)
-    bleed_mask = ((dilated_final > 0) & (group_mask == 0)).astype(np.uint8) * 255
-
-    bleed_color = cv2.dilate(canvas_fill_masked, kernel2)
-    return bleed_mask, bleed_color
+    # Raster bleed disabled (cv2 removed).
+    return group_mask, canvas_fill
 
 
 def write_pack_png(
@@ -1310,134 +1406,8 @@ def write_pack_png(
     draw_scale: float | None = None,
     out_path: Path | None = None,
 ) -> None:
-    scale = float(draw_scale) if draw_scale is not None else float(config.DRAW_SCALE)
-    out_png = out_path if out_path is not None else config.OUT_PACK_PNG
-    w, h = canvas
-    hi_scale = scale * 2
-    img = np.zeros((int(h * hi_scale), int(w * hi_scale), 3), dtype=np.uint8)
-    alpha = np.zeros((int(h * hi_scale), int(w * hi_scale)), dtype=np.uint8)
-    zone_shift: Dict[int, Tuple[float, float]] = {}
-    zone_rot: Dict[int, float] = {}
-    zone_center: Dict[int, Tuple[float, float]] = {}
-    for idx, zid in enumerate(zone_order):
-        dx, dy, _, _, _ = placements[idx]
-        zone_shift[zid] = (dx, dy)
-        info = rot_info[idx] if idx < len(rot_info) else {"angle": 0.0, "cx": 0.0, "cy": 0.0}
-        zone_rot[zid] = float(info.get("angle", 0.0))
-        zone_center[zid] = (float(info.get("cx", 0.0)), float(info.get("cy", 0.0)))
-
-    total_polys = len(polys)
-    thread_count = min(20, total_polys) if total_polys else 0
-
-    def _render_chunk(thread_idx: int, start: int, end: int) -> Tuple[np.ndarray, np.ndarray]:
-        _log_step(f"pack_png thread {thread_idx} start {start}-{end - 1} count={end - start}")
-        t_img = np.zeros_like(img)
-        t_alpha = np.zeros_like(alpha)
-        for rid in range(start, end):
-            if rid >= len(zone_id):
-                continue
-            zid = zone_id[rid]
-            if zid not in zone_shift:
-                continue
-            dx, dy = zone_shift[zid]
-            ang = zone_rot.get(zid, 0.0)
-            cx, cy = zone_center.get(zid, (0.0, 0.0))
-            rpts = _rotate_pts(polys[rid], ang, cx, cy)
-            pts_shifted = np.array(
-                [[(p[0] + dx) * hi_scale, (p[1] + dy) * hi_scale] for p in rpts],
-                dtype=np.int32,
-            )
-            color = colors[rid]
-            cv2.fillPoly(t_img, [pts_shifted], color)
-            cv2.fillPoly(t_alpha, [pts_shifted], 255)
-        _log_step(f"pack_png thread {thread_idx} done {start}-{end - 1}")
-        return t_img, t_alpha
-
-    t_results: List[Tuple[np.ndarray, np.ndarray]] = []
-    if thread_count <= 1:
-        for rid, pts in enumerate(polys):
-            if rid >= len(zone_id):
-                continue
-            zid = zone_id[rid]
-            if zid not in zone_shift:
-                continue
-            dx, dy = zone_shift[zid]
-            ang = zone_rot.get(zid, 0.0)
-            cx, cy = zone_center.get(zid, (0.0, 0.0))
-            rpts = _rotate_pts(pts, ang, cx, cy)
-            pts_shifted = np.array(
-                [[(p[0] + dx) * hi_scale, (p[1] + dy) * hi_scale] for p in rpts],
-                dtype=np.int32,
-            )
-            color = colors[rid]
-            cv2.fillPoly(img, [pts_shifted], color)
-            cv2.fillPoly(alpha, [pts_shifted], 255)
-    else:
-        chunk = int(ceil(total_polys / float(thread_count)))
-        with ThreadPoolExecutor(max_workers=thread_count) as ex:
-            futures = []
-            thread_idx = 1
-            for start in range(0, total_polys, chunk):
-                end = min(total_polys, start + chunk)
-                futures.append(ex.submit(_render_chunk, thread_idx, start, end))
-                thread_idx += 1
-            for fut in futures:
-                t_results.append(fut.result())
-
-        _log_step(f"pack_png merge start threads={thread_count} tiles=20")
-        merge_tiles = 20
-        merge_step = int(ceil(img.shape[0] / float(merge_tiles))) if img.shape[0] else img.shape[0]
-
-        def _merge_tile(tile_idx: int, y0: int, y1: int) -> None:
-            _log_step(f"pack_png merge thread {tile_idx} start rows {y0}-{y1 - 1}")
-            for t_img, t_alpha in t_results:
-                ta = t_alpha[y0:y1]
-                if not np.any(ta):
-                    continue
-                mask = ta > 0
-                img_slice = img[y0:y1]
-                t_slice = t_img[y0:y1]
-                img_slice[mask] = t_slice[mask]
-                img[y0:y1] = img_slice
-                alpha[y0:y1][mask] = 255
-            _log_step(f"pack_png merge thread {tile_idx} done rows {y0}-{y1 - 1}")
-
-        with ThreadPoolExecutor(max_workers=merge_tiles) as ex:
-            futures = []
-            tile_idx = 1
-            for y0 in range(0, img.shape[0], merge_step):
-                y1 = min(img.shape[0], y0 + merge_step)
-                futures.append(ex.submit(_merge_tile, tile_idx, y0, y1))
-                tile_idx += 1
-            for fut in futures:
-                fut.result()
-        _log_step("pack_png merge done")
-
-    zone_exteriors: Dict[int, List[List[Tuple[float, float]]]] = {}
-    for zid in zone_shift.keys():
-        parts = [Polygon(polys[rid]) for rid in range(len(polys)) if zone_id[rid] == zid]
-        if not parts:
-            continue
-        merged = unary_union(parts)
-        geoms = list(merged.geoms) if hasattr(merged, "geoms") else [merged]
-        exts: List[List[Tuple[float, float]]] = []
-        for g in geoms:
-            if g.is_empty or g.geom_type != "Polygon":
-                continue
-            coords = list(g.exterior.coords)
-            if len(coords) > 1 and coords[0] == coords[-1]:
-                coords = coords[:-1]
-            if len(coords) >= 3:
-                exts.append([(float(x), float(y)) for x, y in coords])
-        if exts:
-            zone_exteriors[zid] = exts
-
-    # Bleed now rendered as vector paths in packed.svg; keep PNG un-bleeded.
-
-    img_out = cv2.resize(img, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-    alpha_out = cv2.resize(alpha, (int(w * scale), int(h * scale)), interpolation=cv2.INTER_AREA)
-    rgba = cv2.merge([img_out[:, :, 0], img_out[:, :, 1], img_out[:, :, 2], alpha_out])
-    cv2.imwrite(str(out_png), rgba)
+    # Raster output disabled (cv2 removed).
+    return
 
 
 def write_pack_svg(
@@ -1728,42 +1698,8 @@ def write_pack_outline_png(
     zone_geoms: Dict[int, BaseGeometry],
     rot_info: List[Dict[str, float]],
 ) -> None:
-    w, h = canvas
-    hi_scale = config.DRAW_SCALE * 2
-    img = np.full((int(h * hi_scale), int(w * hi_scale), 3), 255, dtype=np.uint8)
-    zone_shift: Dict[int, Tuple[float, float]] = {}
-    zone_rot: Dict[int, float] = {}
-    zone_center: Dict[int, Tuple[float, float]] = {}
-    for idx, zid in enumerate(zone_order):
-        if page_idx is not None:
-            if placement_bin_by_zid is not None:
-                if placement_bin_by_zid.get(zid, -1) != page_idx:
-                    continue
-            elif placement_bin is not None:
-                if idx >= len(placement_bin) or placement_bin[idx] != page_idx:
-                    continue
-        dx, dy, _, _, _ = placements[idx]
-        zone_shift[zid] = (dx, dy)
-        info = rot_info[idx] if idx < len(rot_info) else {"angle": 0.0, "cx": 0.0, "cy": 0.0}
-        zone_rot[zid] = float(info.get("angle", 0.0))
-        zone_center[zid] = (float(info.get("cx", 0.0)), float(info.get("cy", 0.0)))
-
-    for rid, pts in enumerate(polys):
-        zid = zone_id[rid]
-        if zid not in zone_shift:
-            continue
-        dx, dy = zone_shift[zid]
-        ang = zone_rot.get(zid, 0.0)
-        cx, cy = zone_center.get(zid, (0.0, 0.0))
-        rpts = _rotate_pts(pts, ang, cx, cy)
-        pts_shifted = np.array(
-            [[(p[0] + dx) * hi_scale, (p[1] + dy) * hi_scale] for p in rpts],
-            dtype=np.int32,
-        )
-        cv2.polylines(img, [pts_shifted], True, (0, 0, 0), 1, cv2.LINE_AA)
-
-    img_out = cv2.resize(img, (int(w * config.DRAW_SCALE), int(h * config.DRAW_SCALE)), interpolation=cv2.INTER_AREA)
-    cv2.imwrite(str(config.OUT_PACK_OUTLINE_PNG), img_out)
+    # Raster output disabled (cv2 removed).
+    return
 
 
 def compute_scene(svg_path, snap: float, render_packed_png: bool = False) -> Dict:
@@ -1800,14 +1736,44 @@ def compute_scene(svg_path, snap: float, render_packed_png: bool = False) -> Dic
         use_gap_only=False,
     )
     zone_labels = {}
+    zone_index = {z: idx for idx, z in enumerate(zone_order)}
     for zid, geom in zone_geoms.items():
-        members = zone_members.get(zid, [])
-        if members:
-            rid0 = members[0]
-            c = Polygon(polys[rid0]).centroid
-            lx, ly = float(c.x), float(c.y)
-        else:
-            lx, ly = zones._label_pos_for_zone(geom)
+        lx = None
+        ly = None
+        idx = zone_index.get(zid, None)
+        if idx is not None and idx < len(zone_polys):
+            border_pts = zone_polys[idx]
+            if border_pts:
+                try:
+                    border_poly = Polygon(border_pts)
+                    c = border_poly.centroid
+                    cx = float(c.x)
+                    cy = float(c.y)
+                    half_w = 1.2
+                    half_h = 1.2
+                    test_pts = [
+                        (cx, cy),
+                        (cx - half_w, cy - half_h),
+                        (cx + half_w, cy - half_h),
+                        (cx - half_w, cy + half_h),
+                        (cx + half_w, cy + half_h),
+                        (cx, cy - half_h),
+                        (cx, cy + half_h),
+                        (cx - half_w, cy),
+                        (cx + half_w, cy),
+                    ]
+                    if all(geom.covers(Point(px, py)) for px, py in test_pts):
+                        lx, ly = cx, cy
+                except Exception:
+                    pass
+        if lx is None or ly is None:
+            members = zone_members.get(zid, [])
+            if members:
+                rid0 = members[0]
+                c = Polygon(polys[rid0]).centroid
+                lx, ly = float(c.x), float(c.y)
+            else:
+                lx, ly = zones._label_pos_for_zone(geom)
         zone_labels[str(zid)] = {"x": lx, "y": ly, "label": zone_label_map.get(zid, zid)}
 
     region_labels = {}
@@ -1974,9 +1940,14 @@ def compute_scene(svg_path, snap: float, render_packed_png: bool = False) -> Dic
         )
     config.OUT_PACK_MISSING_LOG.write_text("\n".join(lines), encoding="utf-8")
 
+    write_pack_log(zone_pack_polys, placements, rot_info, zone_label_map, config.OUT_PACK_LOG, canvas)
+
     placement_bin = [int(info.get("bin", -1)) for info in rot_info]
     order_page0 = [i for i, b in enumerate(placement_bin) if b == 0]
     order_page1 = [i for i, b in enumerate(placement_bin) if b == 1]
+    placement_bin_by_zid = {
+        zid: placement_bin[idx] for idx, zid in enumerate(zone_order) if idx < len(placement_bin)
+    }
     placement_bin_by_zid = {zid: placement_bin[idx] for idx, zid in enumerate(zone_order) if idx < len(placement_bin)}
 
     write_pack_bbox_svg(
@@ -2178,8 +2149,8 @@ def main() -> None:
         preferred_indices=None,
         use_gap_only=False,
     )
-    write_pack_log(zone_pack_polys, placements, rot_info, config.OUT_PACK_LOG, base_canvas)
-    write_pack_log(zone_pack_polys, placements, rot_info, config.OUT_PACK_LOG, base_canvas)
+    write_pack_log(zone_pack_polys, placements, rot_info, zone_labels, config.OUT_PACK_LOG, base_canvas)
+    write_pack_log(zone_pack_polys, placements, rot_info, zone_labels, config.OUT_PACK_LOG, base_canvas)
     placement_bin = [int(info.get("bin", -1)) for info in rot_info]
     order_page0 = [i for i, b in enumerate(placement_bin) if b == 0]
     order_page1 = [i for i, b in enumerate(placement_bin) if b == 1]
