@@ -139,6 +139,17 @@ def api_state():
     return jsonify({"ok": True})
 
 
+@app.get("/api/state")
+def api_get_state():
+    if STATE_JSON.exists():
+        try:
+            data = json.loads(STATE_JSON.read_text(encoding="utf-8"))
+            return jsonify(data)
+        except Exception:
+            return jsonify({})
+    return jsonify({})
+
+
 @app.get("/api/packed_labels")
 def api_packed_labels():
     if PACKED_LABELS_JSON.exists():

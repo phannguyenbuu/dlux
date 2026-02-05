@@ -1013,13 +1013,9 @@ export default function App() {
     const onKey = (e) => {
       if (!selectedOverlayId) return;
       if (e.key !== "Delete" && e.key !== "Backspace") return;
-      setOverlayItems((items) => {
-        const next = items.filter((item) => item.id !== selectedOverlayId);
-        saveSvg(nodes, segs, next);
-        return next;
-      });
-      setSelectedOverlayId(null);
-    };
+        setOverlayItems((items) => items.filter((item) => item.id !== selectedOverlayId));
+        setSelectedOverlayId(null);
+      };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [selectedOverlayId, nodes, segs, overlayItems]);
@@ -1029,6 +1025,16 @@ export default function App() {
       setError("");
       setAutoFit(fit);
       setSceneLoading(true);
+      let savedView = null;
+      try {
+        const stateRes = await fetch("/api/state");
+        if (stateRes.ok) {
+          const stateJson = await stateRes.json();
+          savedView = stateJson?.view || null;
+        }
+      } catch {
+        savedView = null;
+      }
       const svgRes = await fetch("/out/convoi.svg");
       if (!svgRes.ok) throw new Error(`svg fetch failed: ${svgRes.status}`);
       const svgText = await svgRes.text();
@@ -1181,11 +1187,28 @@ export default function App() {
           });
           setPackedLabels(nextPackedLabels);
         }
-      if (fit) {
-        const w = parsedSize.w || data.canvas?.w || 1200;
-        const h = parsedSize.h || data.canvas?.h || 800;
-        const viewW = stageSize.w;
-        const viewH = stageSize.h;
+        if (savedView?.source?.scale && savedView?.source?.pos) {
+          setScale(savedView.source.scale);
+          setPos(savedView.source.pos);
+          setAutoFit(false);
+        }
+        if (savedView?.region?.scale && savedView?.region?.pos) {
+          setRegionScale(savedView.region.scale);
+          setRegionPos(savedView.region.pos);
+        }
+        if (savedView?.region2?.scale && savedView?.region2?.pos) {
+          setRegion2Scale(savedView.region2.scale);
+          setRegion2Pos(savedView.region2.pos);
+        }
+        if (savedView?.zone?.scale && savedView?.zone?.pos) {
+          setZoneScale(savedView.zone.scale);
+          setZonePos(savedView.zone.pos);
+        }
+        if (fit && !(savedView?.source?.scale && savedView?.source?.pos)) {
+          const w = parsedSize.w || data.canvas?.w || 1200;
+          const h = parsedSize.h || data.canvas?.h || 800;
+          const viewW = stageSize.w;
+          const viewH = stageSize.h;
         const fitScale = Math.min(viewW / w, viewH / h) * 0.95;
         setScale(fitScale);
         setPos({
@@ -1271,7 +1294,6 @@ export default function App() {
     const next = [...overlayItems, item];
     setOverlayItems(next);
     setSelectedOverlayId(id);
-    saveSvg(nodes, segs, next);
     e.target.value = "";
   };
 
@@ -1287,7 +1309,6 @@ export default function App() {
       i.id === id ? { ...i, src, img, rawSvg: raw } : i
     );
     setOverlayItems(next);
-    saveSvg(nodes, segs, next);
   };
 
   const buildSimulateHtml = (data, packed, fontFamily, fontSize) => {
@@ -1787,6 +1808,12 @@ export default function App() {
         svg_segments: segs,
         labels,
         snap,
+        view: {
+          source: { scale, pos },
+          region: { scale: regionScale, pos: regionPos },
+          region2: { scale: region2Scale, pos: region2Pos },
+          zone: { scale: zoneScale, pos: zonePos },
+        },
       }),
     });
   };
@@ -2464,7 +2491,6 @@ export default function App() {
                   if (segSet.has(key)) return;
                   const nextSegs = [...segs, [edgeCandidate.a, edgeCandidate.b]];
                   setSegs(nextSegs);
-                  saveSvg(nodes, nextSegs, overlayItems).then(() => loadScene(false, false, false));
                   return;
                 }
                 if (deleteEdgeMode) {
@@ -2473,7 +2499,6 @@ export default function App() {
                   const pruned = pruneIsolatedNodes(nodes, nextSegs);
                   setNodes(pruned.nodes);
                   setSegs(pruned.segs);
-                  saveSvg(pruned.nodes, pruned.segs, overlayItems).then(() => loadScene(false, false, false));
                   return;
                 }
                 if (addNodeMode) {
@@ -2493,7 +2518,6 @@ export default function App() {
                   }
                   setNodes(nextNodes);
                   setSegs(nextSegs);
-                  saveSvg(nextNodes, nextSegs, overlayItems).then(() => loadScene(false, false, false));
                 }
               }}
               ref={stageRef}
@@ -2571,7 +2595,6 @@ export default function App() {
                       o.id === item.id ? { ...o, x: nx, y: ny, zid } : o
                     );
                     setOverlayItems(next);
-                    saveSvg(nodes, segs, next);
                   }}
                   onTransformEnd={() => {
                     const node = overlayNodeRefs.current[item.id];
@@ -2596,7 +2619,6 @@ export default function App() {
                         : o
                     );
                     setOverlayItems(next);
-                    saveSvg(nodes, segs, next);
                   }}
                   ref={(node) => {
                     if (node) overlayNodeRefs.current[item.id] = node;
@@ -2635,16 +2657,15 @@ export default function App() {
                 );
                 setNodes(next);
               }}
-              onDragEnd={(e) => {
-                const next = nodes.map((p) =>
-                  p.id === n.id ? { ...p, x: e.target.x(), y: e.target.y() } : p
-                );
-                const merged = mergeNodesIfClose(next, segs, n.id, snap);
-                setNodes(merged.nodes);
-                setSegs(merged.segs);
-                saveSvg(merged.nodes, merged.segs, overlayItems).then(() => loadScene(false, false, false));
-              }}
-            />
+                onDragEnd={(e) => {
+                  const next = nodes.map((p) =>
+                    p.id === n.id ? { ...p, x: e.target.x(), y: e.target.y() } : p
+                  );
+                  const merged = mergeNodesIfClose(next, segs, n.id, snap);
+                  setNodes(merged.nodes);
+                  setSegs(merged.segs);
+                }}
+              />
           ))}
         </Layer>
           </Stage>
@@ -2971,7 +2992,10 @@ export default function App() {
                   <button
                     className="btn"
                     onClick={() => {
-                      saveSvg(nodes, segs, overlayItems).then(() => loadScene(false, false, true));
+                      saveSvg(nodes, segs, overlayItems).then(async () => {
+                        await saveState();
+                        await loadScene(true, false, true);
+                      });
                     }}
                   >
                     Save

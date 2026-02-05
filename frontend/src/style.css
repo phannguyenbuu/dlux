@@ -140,6 +140,13 @@ body {
   cursor: pointer;
 }
 
+.icon-button.active,
+.icon-button[aria-pressed="true"] {
+  background: rgba(80, 90, 200, 0.4);
+  border-color: rgba(140, 160, 255, 0.85);
+  box-shadow: 0 0 0 2px rgba(120, 150, 255, 0.25);
+}
+
 .icon-button:hover {
   background: rgba(17, 21, 46, 0.85);
 }
