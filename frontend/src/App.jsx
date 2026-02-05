@@ -1707,6 +1707,20 @@ export default function App() {
     return null;
   };
 
+  const findZoneIdByLabel = (label) => {
+    const source = zoneScene || scene;
+    if (!source) return String(label);
+    const target = String(label);
+    const map = source.zone_label_map || {};
+    for (const [zid, mapped] of Object.entries(map)) {
+      if (String(mapped) === target) return String(zid);
+    }
+    for (const [zid, info] of Object.entries(source.zone_labels || {})) {
+      if (String(info?.label) === target) return String(zid);
+    }
+    return target;
+  };
+
   const transformOverlayToPacked = (item) => {
     if (!scene || !item || item.zid == null) return item;
     const zid = item.zid;
@@ -3109,7 +3123,7 @@ export default function App() {
                     )}
                   </Layer>
                   <Layer name="zone-label" visible={showLabels}>
-                    {Object.values((zoneScene || scene).zone_labels || {}).map((lbl) => {
+                    {Object.entries((zoneScene || scene).zone_labels || {}).map(([zid, lbl]) => {
                       const selectedShuffle =
                         (zoneScene || scene)?.zone_label_map?.[selectedZoneId] ??
                         (zoneScene || scene)?.zone_label_map?.[parseInt(selectedZoneId, 10)];
@@ -3117,21 +3131,35 @@ export default function App() {
                       const isSelected = String(lbl.label) === String(targetLabel);
                       const size = Math.max(labelFontSize / zoneScale, 6 / zoneScale);
                       const metrics = measureText(lbl.label, size, labelFontFamily);
-                      return (
-                        <Text
-                          key={`zl-${lbl.label}`}
-                          x={lbl.x}
-                          y={lbl.y}
-                          text={`${lbl.label}`}
-                          fill={isSelected ? "#ff3b30" : "#ffffff"}
-                          fontSize={size}
-                          fontFamily={labelFontFamily}
-                          align="center"
-                          verticalAlign="middle"
-                          offsetX={metrics.width / 2}
-                          offsetY={metrics.height / 2}
-                        />
-                      );
+                        return (
+                          <Text
+                            key={`zl-${zid}`}
+                            x={lbl.x}
+                            y={lbl.y}
+                            text={`${lbl.label}`}
+                            fill={isSelected ? "#ff3b30" : "#ffffff"}
+                            fontSize={size}
+                            fontFamily={labelFontFamily}
+                            align="center"
+                            verticalAlign="middle"
+                            offsetX={metrics.width / 2}
+                            offsetY={metrics.height / 2}
+                            listening
+                            hitStrokeWidth={10 / zoneScale}
+                            onClick={() => {
+                              setSelectedZoneId(String(zid));
+                            }}
+                            onTap={() => {
+                              setSelectedZoneId(String(zid));
+                            }}
+                            onMouseDown={() => {
+                              setSelectedZoneId(String(zid));
+                            }}
+                            onTouchStart={() => {
+                              setSelectedZoneId(String(zid));
+                            }}
+                          />
+                        );
                     })}
                   </Layer>
                 </Stage>
