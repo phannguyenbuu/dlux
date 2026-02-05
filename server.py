@@ -502,6 +502,22 @@ def api_save_konva_svg():
     return jsonify({"ok": True, "path": str(out_path)})
 
 
+@app.post("/api/save_html")
+def api_save_html():
+    payload: Dict[str, Any] = request.get_json(silent=True) or {}
+    name = str(payload.get("name", "")).strip()
+    html = payload.get("html", "")
+    if not name or not html:
+        return jsonify({"ok": False, "error": "missing name/html"}), 400
+    safe_name = os.path.basename(name)
+    if not safe_name.lower().endswith(".html"):
+        safe_name = f"{safe_name}.html"
+    EXPORT_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = EXPORT_DIR / safe_name
+    out_path.write_text(html, encoding="utf-8")
+    return jsonify({"ok": True, "path": str(out_path), "name": out_path.name})
+
+
 @app.post("/api/export_pdf")
 def api_export_pdf():
     payload: Dict[str, Any] = request.get_json(silent=True) or {}
@@ -862,11 +878,23 @@ def api_download_pdf():
     return send_from_directory(EXPORT_DIR, safe_name, as_attachment=True)
 
 
+@app.get("/api/download_html")
+def api_download_html():
+    name = request.args.get("name", "")
+    safe_name = os.path.basename(name)
+    if not safe_name.lower().endswith(".html"):
+        return jsonify({"ok": False, "error": "invalid name"}), 400
+    if not (EXPORT_DIR / safe_name).exists():
+        return jsonify({"ok": False, "error": "not found"}), 404
+    return send_from_directory(EXPORT_DIR, safe_name, as_attachment=True)
+
+
 @app.post("/api/save_svg")
 def api_save_svg():
     payload: Dict[str, Any] = request.get_json(silent=True) or {}
     nodes = payload.get("nodes", [])
     segs = payload.get("segs", [])
+    overlays = payload.get("overlays", []) or []
     if not SVG_PATH.exists():
         return jsonify({"ok": False, "error": "convoi.svg not found"}), 404
 
@@ -876,11 +904,13 @@ def api_save_svg():
     tree = ET.parse(SVG_PATH)
     root = tree.getroot()
 
-    # remove existing line/polyline/polygon (keep image)
+    # remove existing line/polyline/polygon (keep image) + overlay group
     for parent in list(root.iter()):
         for child in list(parent):
             tag = child.tag.rsplit("}", 1)[-1]
             if tag in {"line", "polyline", "polygon"}:
+                parent.remove(child)
+            if tag == "g" and child.attrib.get("id") == "OVERLAY":
                 parent.remove(child)
 
     ns = {"svg": "http://www.w3.org/2000/svg"}
@@ -905,6 +935,46 @@ def api_save_svg():
         except Exception:
             continue
     root.append(g)
+
+    if overlays:
+        og = ET.Element("g", {"id": "OVERLAY"})
+        for item in overlays:
+            try:
+                src = str(item.get("src") or "")
+                if not src:
+                    continue
+                x = float(item.get("x") or 0)
+                y = float(item.get("y") or 0)
+                w = float(item.get("width") or 0) or 1.0
+                h = float(item.get("height") or 0) or 1.0
+                sx = float(item.get("scaleX") or 1.0)
+                sy = float(item.get("scaleY") or 1.0)
+                rot = float(item.get("rotation") or 0.0)
+            except Exception:
+                continue
+            img = ET.Element(
+                "image",
+                {
+                    "x": str(-w / 2.0),
+                    "y": str(-h / 2.0),
+                    "width": str(w),
+                    "height": str(h),
+                    "transform": f"translate({x} {y}) rotate({rot}) scale({sx} {sy})",
+                    "data-overlay": "1",
+                    "data-id": str(item.get("id") or ""),
+                    "data-x": str(x),
+                    "data-y": str(y),
+                    "data-width": str(w),
+                    "data-height": str(h),
+                    "data-scale-x": str(sx),
+                    "data-scale-y": str(sy),
+                    "data-rotation": str(rot),
+                },
+            )
+            img.set("{http://www.w3.org/1999/xlink}href", src)
+            img.set("href", src)
+            og.append(img)
+        root.append(og)
 
     tree.write(SVG_PATH, encoding="utf-8", xml_declaration=True)
     return jsonify({"ok": True})

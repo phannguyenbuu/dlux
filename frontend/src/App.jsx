@@ -1,6 +1,6 @@
 import React, { useMemo, useRef, useState, useEffect } from "react";
 import Konva from "konva";
-import { Stage, Layer, Line, Text, Circle, Rect, Path, Group } from "react-konva";
+import { Stage, Layer, Line, Text, Circle, Rect, Path, Group, Image, Transformer } from "react-konva";
 
 const toPoints = (pts) => pts.flatMap((p) => [p[0], p[1]]);
 
@@ -237,6 +237,88 @@ const parseSvgSize = (svgText) => {
     h: Number.isFinite(h) ? h : 1000,
   };
 };
+
+const getSvgHref = (el) =>
+  el.getAttribute("href") || el.getAttribute("xlink:href") || el.getAttribute("href.baseVal") || "";
+
+const svgToDataUrl = (svgText) =>
+  `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svgText)}`;
+
+const decodeSvgDataUrl = (src) => {
+  if (!src || !src.startsWith("data:image/svg+xml")) return null;
+  const parts = src.split(",");
+  if (parts.length < 2) return null;
+  try {
+    return decodeURIComponent(parts.slice(1).join(","));
+  } catch {
+    return null;
+  }
+};
+
+const applySvgFill = (svgText, color) => {
+  if (!svgText) return svgText;
+  try {
+    const doc = new DOMParser().parseFromString(svgText, "image/svg+xml");
+    const tags = ["path", "rect", "circle", "ellipse", "polygon", "polyline"];
+    tags.forEach((tag) => {
+      doc.querySelectorAll(tag).forEach((el) => {
+        const fill = el.getAttribute("fill");
+        if (fill && fill.toLowerCase() === "none") return;
+        el.setAttribute("fill", color);
+      });
+    });
+    return new XMLSerializer().serializeToString(doc);
+  } catch {
+    return svgText;
+  }
+};
+
+const parseOverlayItems = (svgText) => {
+  if (!svgText) return [];
+  try {
+    const doc = new DOMParser().parseFromString(svgText, "image/svg+xml");
+    const nodes = Array.from(
+      doc.querySelectorAll("g#OVERLAY image[data-overlay='1'], image[data-overlay='1']")
+    );
+    return nodes.map((node, idx) => {
+      const src = getSvgHref(node);
+      const x = parseFloat(node.getAttribute("data-x") || node.getAttribute("x") || "0");
+      const y = parseFloat(node.getAttribute("data-y") || node.getAttribute("y") || "0");
+      const width = parseFloat(node.getAttribute("data-width") || node.getAttribute("width") || "0");
+      const height = parseFloat(
+        node.getAttribute("data-height") || node.getAttribute("height") || "0"
+      );
+      const scaleX = parseFloat(node.getAttribute("data-scale-x") || "1");
+      const scaleY = parseFloat(node.getAttribute("data-scale-y") || "1");
+      const rotation = parseFloat(node.getAttribute("data-rotation") || "0");
+      return {
+        id: node.getAttribute("data-id") || `overlay-${idx}`,
+        src,
+        x,
+        y,
+        width,
+        height,
+        scaleX: Number.isFinite(scaleX) ? scaleX : 1,
+        scaleY: Number.isFinite(scaleY) ? scaleY : 1,
+        rotation: Number.isFinite(rotation) ? rotation : 0,
+      };
+    });
+  } catch {
+    return [];
+  }
+};
+
+const loadImageFromSrc = (src) =>
+  new Promise((resolve) => {
+    if (!src) {
+      resolve(null);
+      return;
+    }
+    const img = new window.Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => resolve(null);
+    img.src = src;
+  });
 
 const buildSegmentsFromSvg = (svgText) => {
   const doc = new DOMParser().parseFromString(svgText, "image/svg+xml");
@@ -491,11 +573,13 @@ const splitAtIntersections = (segments) => {
 export default function App() {
   const [snap, setSnap] = useState(1);
   const [scene, setScene] = useState(null);
+  const [zoneScene, setZoneScene] = useState(null);
   const [error, setError] = useState("");
   const [labels, setLabels] = useState([]);
   const [packedLabels, setPackedLabels] = useState([]);
   const [exportMsg, setExportMsg] = useState("");
   const [exportPdfInfo, setExportPdfInfo] = useState(null);
+  const [exportHtmlInfo, setExportHtmlInfo] = useState([]);
   const [exportPdfLoading, setExportPdfLoading] = useState(false);
   const [showSim, setShowSim] = useState(false);
   const [simPlaying, setSimPlaying] = useState(false);
@@ -513,6 +597,9 @@ export default function App() {
   const [svgSize, setSvgSize] = useState({ w: 1000, h: 1000 });
   const stageRef = useRef(null);
   const leftRef = useRef(null);
+  const overlayInputRef = useRef(null);
+  const overlayTransformerRef = useRef(null);
+  const overlayNodeRefs = useRef({});
   const [scale, setScale] = useState(1);
   const [pos, setPos] = useState({ x: 0, y: 0 });
   const [stageSize, setStageSize] = useState({ w: 800, h: 600 });
@@ -546,7 +633,10 @@ export default function App() {
   const [packedBleedPaths2, setPackedBleedPaths2] = useState([]);
   const [packedBleedError2, setPackedBleedError2] = useState("");
   const [edgeMode, setEdgeMode] = useState(false);
+  const [addNodeMode, setAddNodeMode] = useState(false);
+  const [deleteEdgeMode, setDeleteEdgeMode] = useState(false);
   const [edgeCandidate, setEdgeCandidate] = useState(null);
+  const [deleteEdgeCandidate, setDeleteEdgeCandidate] = useState(null);
   const [sceneLoading, setSceneLoading] = useState(true);
   const [packPadding, setPackPadding] = useState(4);
   const [packMarginX, setPackMarginX] = useState(30);
@@ -557,6 +647,9 @@ export default function App() {
   const [packAngle, setPackAngle] = useState(5);
   const [packMode, setPackMode] = useState("fast");
   const [autoPack, setAutoPack] = useState(false);
+  const [overlayItems, setOverlayItems] = useState([]);
+  const [selectedOverlayId, setSelectedOverlayId] = useState(null);
+  const [overlayFill, setOverlayFill] = useState("#000000");
 
   const simZoneIds = useMemo(() => {
     const ids = Object.keys(scene?.zone_boundaries || {});
@@ -893,7 +986,45 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [svgSize, stageSize, autoFit]);
 
-  const loadScene = async (fit = true) => {
+  useEffect(() => {
+    if (!scene || !overlayItems.length) return;
+    const updated = overlayItems.map((item) => {
+      if (!item) return item;
+      const zid = findZoneAtPoint({ x: item.x, y: item.y });
+      return { ...item, zid: zid ?? item.zid ?? null };
+    });
+    const changed = updated.some((item, idx) => item?.zid !== overlayItems[idx]?.zid);
+    if (changed) setOverlayItems(updated);
+  }, [scene]);
+
+  useEffect(() => {
+    const tr = overlayTransformerRef.current;
+    if (!tr) return;
+    const node = selectedOverlayId ? overlayNodeRefs.current[selectedOverlayId] : null;
+    if (node) {
+      tr.nodes([node]);
+    } else {
+      tr.nodes([]);
+    }
+    tr.getLayer()?.batchDraw?.();
+  }, [selectedOverlayId, overlayItems]);
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (!selectedOverlayId) return;
+      if (e.key !== "Delete" && e.key !== "Backspace") return;
+      setOverlayItems((items) => {
+        const next = items.filter((item) => item.id !== selectedOverlayId);
+        saveSvg(nodes, segs, next);
+        return next;
+      });
+      setSelectedOverlayId(null);
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [selectedOverlayId, nodes, segs, overlayItems]);
+
+  const loadScene = async (fit = true, updatePacked = true, updateZone = true) => {
     try {
       setError("");
       setAutoFit(fit);
@@ -903,6 +1034,31 @@ export default function App() {
       const svgText = await svgRes.text();
       const parsedSize = parseSvgSize(svgText);
       setSvgSize(parsedSize);
+      const overlayParsed = parseOverlayItems(svgText);
+      if (overlayParsed.length) {
+        const hydrated = (
+          await Promise.all(
+            overlayParsed.map(async (item) => {
+              const img = await loadImageFromSrc(item.src);
+              const width = item.width || img?.width || 0;
+              const height = item.height || img?.height || 0;
+              return {
+                ...item,
+                width,
+                height,
+                scaleX: Number.isFinite(item.scaleX) ? item.scaleX : 1,
+                scaleY: Number.isFinite(item.scaleY) ? item.scaleY : 1,
+                rotation: Number.isFinite(item.rotation) ? item.rotation : 0,
+                img,
+              };
+            })
+          )
+        ).filter(Boolean);
+        setOverlayItems(hydrated);
+      } else {
+        setOverlayItems([]);
+      }
+      setSelectedOverlayId(null);
       const parsed = buildSegmentsFromSvg(svgText);
       const segments = parsed.segments;
       const borders = parsed.borderSegments;
@@ -932,34 +1088,38 @@ export default function App() {
         throw new Error(`scene fetch failed: ${res.status}`);
       }
       const data = await res.json();
-      setScene(data);
+        setScene(data);
+        if (updateZone) {
+          setZoneScene(data);
+        }
       logPackedPreview(data);
       if (typeof data.draw_scale === "number") {
         setDrawScale(data.draw_scale);
       }
-      setPackedImageSrc(`/out/packed.svg?t=${Date.now()}`);
-      setPackedImageSrc2(`/out/packed_page2.svg?t=${Date.now()}`);
-      const packedPolyData = buildPackedPolyData(data);
-      const emptyCells = buildPackedEmptyCells(data, packedPolyData);
-      const initLabels = Object.values(data.zone_labels || {}).map((v) => ({
-        id: `z-${v.label}`,
-        x: v.x,
-        y: v.y,
-        label: `${v.label}`,
-      }));
-      setLabels(initLabels);
-      let cachedPacked = {};
-      try {
-        const labelRes = await fetch("/api/packed_labels");
-        if (labelRes.ok) {
-          cachedPacked = (await labelRes.json()) || {};
-        }
-      } catch {
-        cachedPacked = {};
-      }
-      const usedCell = new Set();
-      const cellIndex = (pt) => `${Math.round(pt[0] / 10)}:${Math.round(pt[1] / 10)}`;
-      const nextPackedLabels = Object.entries(data.zone_labels || {}).map(([zid, v]) => {
+        const initLabels = Object.values(data.zone_labels || {}).map((v) => ({
+          id: `z-${v.label}`,
+          x: v.x,
+          y: v.y,
+          label: `${v.label}`,
+        }));
+        setLabels(initLabels);
+        if (updatePacked) {
+          setPackedImageSrc(`/out/packed.svg?t=${Date.now()}`);
+          setPackedImageSrc2(`/out/packed_page2.svg?t=${Date.now()}`);
+          const packedPolyData = buildPackedPolyData(data);
+          const emptyCells = buildPackedEmptyCells(data, packedPolyData);
+          let cachedPacked = {};
+          try {
+            const labelRes = await fetch("/api/packed_labels");
+            if (labelRes.ok) {
+              cachedPacked = (await labelRes.json()) || {};
+            }
+          } catch {
+            cachedPacked = {};
+          }
+          const usedCell = new Set();
+          const cellIndex = (pt) => `${Math.round(pt[0] / 10)}:${Math.round(pt[1] / 10)}`;
+          const nextPackedLabels = Object.entries(data.zone_labels || {}).map(([zid, v]) => {
         const shift = data.zone_shift?.[zid] || data.zone_shift?.[parseInt(zid, 10)];
         const rot = data.zone_rot?.[zid] ?? data.zone_rot?.[parseInt(zid, 10)] ?? 0;
         const center = data.zone_center?.[zid] || data.zone_center?.[parseInt(zid, 10)] || [0, 0];
@@ -1017,9 +1177,10 @@ export default function App() {
         }
         const mapped = data.zone_label_map?.[zid] ?? data.zone_label_map?.[parseInt(zid, 10)];
         const label = mapped != null ? mapped : v.label;
-        return { id: `pz-${zid}`, zid: String(zid), x: px, y: py, label: `${label}` };
-      });
-      setPackedLabels(nextPackedLabels);
+            return { id: `pz-${zid}`, zid: String(zid), x: px, y: py, label: `${label}` };
+          });
+          setPackedLabels(nextPackedLabels);
+        }
       if (fit) {
         const w = parsedSize.w || data.canvas?.w || 1200;
         const h = parsedSize.h || data.canvas?.h || 800;
@@ -1046,6 +1207,372 @@ export default function App() {
       setError(err.message || String(err));
       setSceneLoading(false);
     }
+  };
+
+  const serializeOverlays = (items) =>
+    (items || []).map((item) => ({
+      id: item.id,
+      src: item.src,
+      x: item.x,
+      y: item.y,
+      width: item.width,
+      height: item.height,
+      scaleX: item.scaleX,
+      scaleY: item.scaleY,
+      rotation: item.rotation,
+      zid: item.zid ?? null,
+    }));
+
+  const saveSvg = (nextNodes = nodes, nextSegs = segs, nextOverlays = overlayItems) =>
+    fetch("/api/save_svg", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        nodes: nextNodes,
+        segs: nextSegs,
+        overlays: serializeOverlays(nextOverlays),
+      }),
+    });
+
+  const updateOverlayItem = (id, patch) => {
+    setOverlayItems((items) =>
+      items.map((item) => (item.id === id ? { ...item, ...patch } : item))
+    );
+  };
+
+  const handleOverlayPick = () => {
+    overlayInputRef.current?.click();
+  };
+
+  const handleOverlayFileChange = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const raw = await file.text();
+    const filled = applySvgFill(raw, overlayFill);
+    const src = svgToDataUrl(filled);
+    const img = await loadImageFromSrc(src);
+    const width = img?.width || parseSvgSize(raw).w || 1;
+    const height = img?.height || parseSvgSize(raw).h || 1;
+    const id = `overlay-${Date.now()}`;
+    const item = {
+      id,
+      src,
+      rawSvg: raw,
+      x: svgSize.w * 0.5,
+      y: svgSize.h * 0.5,
+      width,
+      height,
+      scaleX: 1,
+      scaleY: 1,
+      rotation: 0,
+      img,
+      zid: findZoneAtPoint({ x: svgSize.w * 0.5, y: svgSize.h * 0.5 }),
+    };
+    const next = [...overlayItems, item];
+    setOverlayItems(next);
+    setSelectedOverlayId(id);
+    saveSvg(nodes, segs, next);
+    e.target.value = "";
+  };
+
+  const updateOverlayColor = async (id, color) => {
+    const item = overlayItems.find((i) => i.id === id);
+    if (!item) return;
+    const raw = item.rawSvg || decodeSvgDataUrl(item.src);
+    if (!raw) return;
+    const filled = applySvgFill(raw, color);
+    const src = svgToDataUrl(filled);
+    const img = await loadImageFromSrc(src);
+    const next = overlayItems.map((i) =>
+      i.id === id ? { ...i, src, img, rawSvg: raw } : i
+    );
+    setOverlayItems(next);
+    saveSvg(nodes, segs, next);
+  };
+
+  const buildSimulateHtml = (data, packed, fontFamily, fontSize) => {
+    if (!data?.canvas) return "";
+    const payload = {
+      canvas: data.canvas,
+      regions: data.regions || [],
+      zone_id: data.zone_id || [],
+      zone_shift: data.zone_shift || {},
+      zone_rot: data.zone_rot || {},
+      zone_center: data.zone_center || {},
+      zone_labels: data.zone_labels || {},
+      zone_boundaries: data.zone_boundaries || {},
+      zone_label_map: data.zone_label_map || {},
+      region_colors: data.region_colors || [],
+      packed_labels: packed || [],
+      font_family: fontFamily || "Arial",
+      font_size: fontSize || 12,
+    };
+    return `<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Simulate</title>
+    <style>
+      html, body { margin: 0; padding: 0; background: #0b1022; color: #e8ebff; font-family: Arial, sans-serif; }
+      .wrap { width: 100vw; height: 100vh; display: flex; flex-direction: column; }
+      .topbar { height: 48px; display: flex; align-items: center; justify-content: center; position: relative; }
+      .topbar .close { position: absolute; right: 16px; top: 10px; width: 28px; height: 28px; border: 1px solid rgba(232,235,255,0.3); background: rgba(17,21,46,0.6); color: #e8ebff; border-radius: 6px; }
+      .stage-wrap { flex: 1; position: relative; }
+      .controls { height: 56px; display: flex; align-items: center; gap: 12px; padding: 0 16px; }
+      .controls .icon { width: 28px; height: 28px; border-radius: 6px; border: 1px solid rgba(232,235,255,0.3); background: rgba(17,21,46,0.6); color: #e8ebff; }
+      .controls input[type=range] { flex: 1; }
+    </style>
+    <script src="https://unpkg.com/konva@9/konva.min.js"></script>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="topbar">
+        <div id="movingText">Moving index: -</div>
+        <button class="close" title="Close">x</button>
+      </div>
+      <div class="stage-wrap" id="stageWrap"></div>
+      <div class="controls">
+        <button class="icon" id="playBtn">▶</button>
+        <input type="range" id="slider" min="0" max="1" step="0.001" value="0" />
+      </div>
+    </div>
+    <script>
+      const data = ${JSON.stringify(payload)};
+      const wrap = document.getElementById('stageWrap');
+      const movingText = document.getElementById('movingText');
+      const playBtn = document.getElementById('playBtn');
+      const slider = document.getElementById('slider');
+      const gap = 20;
+      let simProgress = 0;
+      let simPlaying = false;
+      const move = 1;
+      const hold = 0.2;
+      const per = move + hold;
+      const zoneIds = Object.keys(data.zone_boundaries || {});
+      const getLabel = (zid) => {
+        const lbl = data.zone_label_map?.[zid] ?? data.zone_label_map?.[parseInt(zid, 10)] ?? zid;
+        const num = Number(lbl);
+        return Number.isFinite(num) ? num : Number(zid) || 0;
+      };
+      zoneIds.sort((a,b) => getLabel(a) - getLabel(b));
+      const total = zoneIds.length ? zoneIds.length * per : 1;
+      const zoneIndex = {};
+      zoneIds.forEach((zid, idx) => zoneIndex[String(zid)] = idx);
+      const simLocalFor = (idx) => {
+        if (idx == null || idx < 0) return 0;
+        const t = simProgress * total - idx * per;
+        if (t <= 0) return 0;
+        if (t >= per) return 1;
+        if (t >= move) return 1;
+        const x = t / move;
+        return 1 - Math.pow(1 - x, 3);
+      };
+      const rotatePt = (pt, angleDeg, cx, cy) => {
+        if (!angleDeg) return pt;
+        const ang = angleDeg * Math.PI / 180;
+        const c = Math.cos(ang);
+        const s = Math.sin(ang);
+        const x = pt[0] - cx;
+        const y = pt[1] - cy;
+        return [cx + x * c - y * s, cy + x * s + y * c];
+      };
+      const transformPath = (pts, shift, rot, center) => {
+        if (!pts || !pts.length) return [];
+        const dx = shift?.[0] ?? 0;
+        const dy = shift?.[1] ?? 0;
+        const ang = rot ?? 0;
+        const cx = center?.[0] ?? 0;
+        const cy = center?.[1] ?? 0;
+        return pts.map((p) => {
+          const r = rotatePt(p, ang, cx, cy);
+          return [r[0] + dx, r[1] + dy];
+        });
+      };
+      const toPoints = (pts) => pts.flatMap(p => [p[0], p[1]]);
+      const offsetPoints = (pts, dx, dy) => pts.map(p => [p[0] + dx, p[1] + dy]);
+      const measureText = (text, size, family) => {
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        ctx.font = size + 'px ' + (family || 'Arial');
+        const metrics = ctx.measureText(text || '');
+        return { width: metrics.width, height: size };
+      };
+      const stage = new Konva.Stage({ container: 'stageWrap', width: 10, height: 10 });
+      const layerFrame = new Konva.Layer();
+      const layerPacked = new Konva.Layer();
+      const layerZoneLabels = new Konva.Layer();
+      const layerZoneStroke = new Konva.Layer();
+      const layerMove = new Konva.Layer();
+      stage.add(layerFrame, layerPacked, layerZoneLabels, layerZoneStroke, layerMove);
+      const rectLeft = new Konva.Rect({ x: 0, y: 0, width: data.canvas.w, height: data.canvas.h, stroke: '#ffffff', strokeWidth: 1 });
+      const rectRight = new Konva.Rect({ x: data.canvas.w + gap, y: 0, width: data.canvas.w, height: data.canvas.h, stroke: '#ffffff', strokeWidth: 1 });
+      layerFrame.add(rectLeft, rectRight);
+
+      const packedShapes = [];
+      data.regions.forEach((poly, idx) => {
+        const zid = data.zone_id?.[idx];
+        const zidKey = String(zid);
+        const shift = data.zone_shift?.[zid] || data.zone_shift?.[parseInt(zid, 10)];
+        if (!shift) return;
+        const rot = data.zone_rot?.[zid] ?? data.zone_rot?.[parseInt(zid, 10)] ?? 0;
+        const center = data.zone_center?.[zid] || data.zone_center?.[parseInt(zid, 10)] || [0,0];
+        const packed = transformPath(poly, shift, rot, center);
+        const shape = new Konva.Line({
+          points: toPoints(packed),
+          closed: true,
+          fill: data.region_colors[idx] || '#ffffff',
+          strokeScaleEnabled: false,
+        });
+        shape._zidKey = zidKey;
+        layerPacked.add(shape);
+        packedShapes.push(shape);
+      });
+      const packedLabels = [];
+      (data.packed_labels || []).forEach((lbl) => {
+        const size = Math.max((data.font_size || 12) * 0.5, 6);
+        const metrics = measureText(lbl.label, size, data.font_family);
+        const text = new Konva.Text({
+          x: lbl.x,
+          y: lbl.y,
+          text: lbl.label,
+          fill: '#ffffff',
+          fontSize: size,
+          fontFamily: data.font_family,
+          align: 'center',
+          verticalAlign: 'middle',
+          offsetX: metrics.width / 2,
+          offsetY: metrics.height / 2,
+        });
+        text._zidKey = String(lbl.zid);
+        layerPacked.add(text);
+        packedLabels.push(text);
+      });
+
+      Object.values(data.zone_labels || {}).forEach((lbl) => {
+        const size = Math.max((data.font_size || 12) * 0.5, 6);
+        const metrics = measureText(lbl.label, size, data.font_family);
+        const text = new Konva.Text({
+          x: lbl.x + data.canvas.w + gap,
+          y: lbl.y,
+          text: lbl.label,
+          fill: '#ffffff',
+          fontSize: size,
+          fontFamily: data.font_family,
+          align: 'center',
+          verticalAlign: 'middle',
+          offsetX: metrics.width / 2,
+          offsetY: metrics.height / 2,
+        });
+        layerZoneLabels.add(text);
+      });
+
+      zoneIds.forEach((zid) => {
+        const paths = data.zone_boundaries?.[zid] || [];
+        paths.forEach((p) => {
+          const shape = new Konva.Line({
+            points: toPoints(offsetPoints(p, data.canvas.w + gap, 0)),
+            stroke: '#f5f6ff',
+            strokeWidth: 1,
+            closed: true,
+          });
+          layerZoneStroke.add(shape);
+        });
+      });
+
+      const movingShapes = [];
+      data.regions.forEach((poly, idx) => {
+        const zid = data.zone_id?.[idx];
+        const zidKey = String(zid);
+        const shift = data.zone_shift?.[zid] || data.zone_shift?.[parseInt(zid, 10)];
+        if (!shift) return;
+        const rot = data.zone_rot?.[zid] ?? data.zone_rot?.[parseInt(zid, 10)] ?? 0;
+        const center = data.zone_center?.[zid] || data.zone_center?.[parseInt(zid, 10)] || [0,0];
+        const src = transformPath(poly, shift, rot, center);
+        const dst = offsetPoints(poly, data.canvas.w + gap, 0);
+        const shape = new Konva.Line({
+          points: toPoints(src),
+          closed: true,
+          fill: data.region_colors[idx] || '#ffffff',
+          strokeScaleEnabled: false,
+        });
+        shape._zidKey = zidKey;
+        shape._src = src;
+        shape._dst = dst;
+        layerMove.add(shape);
+        movingShapes.push(shape);
+      });
+
+      const resize = () => {
+        const rect = wrap.getBoundingClientRect();
+        const totalW = (data.canvas.w * 2) + gap;
+        const totalH = data.canvas.h;
+        const fitScale = Math.min(rect.width / totalW, rect.height / totalH) * 1.06;
+        const offsetX = (rect.width - totalW * fitScale) / 2;
+        const offsetY = (rect.height - totalH * fitScale) / 2;
+        stage.width(rect.width);
+        stage.height(rect.height);
+        stage.scale({ x: fitScale, y: fitScale });
+        stage.position({ x: offsetX, y: offsetY });
+        stage.draw();
+      };
+      resize();
+      window.addEventListener('resize', resize);
+
+      const update = () => {
+        const activeIdx = zoneIds.length ? Math.min(zoneIds.length - 1, Math.max(0, Math.floor((simProgress * total) / per))) : -1;
+        const activeZid = activeIdx >= 0 ? zoneIds[activeIdx] : null;
+        const activeLabel = activeZid != null ? (data.zone_label_map?.[activeZid] ?? data.zone_label_map?.[parseInt(activeZid, 10)] ?? activeZid) : '-';
+        movingText.textContent = 'Moving index: ' + activeLabel;
+        packedShapes.forEach((shape) => {
+          const idx = zoneIndex[shape._zidKey] ?? 0;
+          const local = simLocalFor(idx);
+          shape.visible(local <= 0);
+        });
+        packedLabels.forEach((shape) => {
+          const idx = zoneIndex[shape._zidKey] ?? 0;
+          const local = simLocalFor(idx);
+          shape.visible(local <= 0);
+        });
+        movingShapes.forEach((shape) => {
+          const idx = zoneIndex[shape._zidKey] ?? 0;
+          const local = simLocalFor(idx);
+          if (local <= 0) {
+            shape.visible(false);
+            return;
+          }
+          const pts = shape._src.map((sp, k) => {
+            const dp = shape._dst[k] || sp;
+            return [sp[0] + (dp[0] - sp[0]) * local, sp[1] + (dp[1] - sp[1]) * local];
+          });
+          shape.points(toPoints(pts));
+          shape.visible(true);
+        });
+        layerPacked.draw();
+        layerMove.draw();
+      };
+
+      const tick = (now) => {
+        if (!simPlaying) return;
+        const dt = 1 / 60;
+        simProgress = Math.min(1, simProgress + dt / total);
+        slider.value = simProgress.toFixed(3);
+        if (simProgress >= 1) simPlaying = false;
+        update();
+        requestAnimationFrame(tick);
+      };
+      playBtn.addEventListener('click', () => {
+        simPlaying = !simPlaying;
+        playBtn.textContent = simPlaying ? '❚❚' : '▶';
+        if (simPlaying) requestAnimationFrame(tick);
+      });
+      slider.addEventListener('input', (e) => {
+        simProgress = parseFloat(e.target.value || '0');
+        update();
+      });
+      update();
+    </script>
+  </body>
+</html>`;
   };
 
   const handleWheel = (e) => {
@@ -1131,6 +1658,70 @@ export default function App() {
     return best;
   };
 
+  const findExistingEdgeCandidate = (worldPt) => {
+    if (!nodes.length || !segs.length) return null;
+    const EDGE_HOVER_DIST = 10;
+    let best = null;
+    let bestDist = Infinity;
+    segs.forEach(([a, b], idx) => {
+      const na = nodes[a];
+      const nb = nodes[b];
+      if (!na || !nb) return;
+      const d = pointSegDist([worldPt.x, worldPt.y], [na.x, na.y], [nb.x, nb.y]);
+      if (d <= EDGE_HOVER_DIST && d < bestDist) {
+        bestDist = d;
+        best = { a, b, idx };
+      }
+    });
+    return best;
+  };
+
+  const pruneIsolatedNodes = (nextNodes, nextSegs) => {
+    const connected = new Set();
+    nextSegs.forEach(([a, b]) => {
+      connected.add(a);
+      connected.add(b);
+    });
+    const remap = new Map();
+    const kept = [];
+    nextNodes.forEach((n, idx) => {
+      if (connected.has(idx)) {
+        remap.set(idx, kept.length);
+        kept.push({ ...n, id: kept.length });
+      }
+    });
+    const remappedSegs = nextSegs
+      .map(([a, b]) => [remap.get(a), remap.get(b)])
+      .filter(([a, b]) => a != null && b != null && a !== b);
+    return { nodes: kept, segs: remappedSegs };
+  };
+
+  const findZoneAtPoint = (pt) => {
+    const source = zoneScene || scene;
+    const zones = source?.zone_boundaries || {};
+    for (const [zid, paths] of Object.entries(zones)) {
+      for (const poly of paths || []) {
+        if (pointInPoly([pt.x, pt.y], poly)) return String(zid);
+      }
+    }
+    return null;
+  };
+
+  const transformOverlayToPacked = (item) => {
+    if (!scene || !item || item.zid == null) return item;
+    const zid = item.zid;
+    const shift = scene.zone_shift?.[zid] || scene.zone_shift?.[parseInt(zid, 10)];
+    const rot = scene.zone_rot?.[zid] ?? scene.zone_rot?.[parseInt(zid, 10)] ?? 0;
+    const center = scene.zone_center?.[zid] || scene.zone_center?.[parseInt(zid, 10)] || [0, 0];
+    const [pt] = transformPath([[item.x, item.y]], shift, rot, center);
+    return {
+      ...item,
+      x: pt[0],
+      y: pt[1],
+      rotation: (item.rotation || 0) + (rot || 0),
+    };
+  };
+
   const handleRegion2Wheel = (e) => {
     e.evt.preventDefault();
     const scaleBy = 1.05;
@@ -1199,46 +1790,50 @@ export default function App() {
       const zoneLabelsSvg = (svgText) =>
         injectSvgLabels(svgText, scene.zone_labels, labelFontFamily, labelFontSize);
       const pages = [
-        {
-          name: "zone_image",
-          svg: zoneLabelsSvg(
-            captureStageSvg(zoneRef, size, {
-              "zone-image": true,
-              "zone-stroke": true,
-              "zone-label": true,
-              "zone-hit": false,
-            })
-          ),
-        },
-        {
-          name: "zone_noimage",
-          svg: zoneLabelsSvg(
-            captureStageSvg(zoneRef, size, {
-              "zone-image": false,
-              "zone-stroke": true,
-              "zone-label": true,
-              "zone-hit": false,
-            })
-          ),
-        },
-        {
-          name: "packed_image_nostroke",
-          svg: captureStageSvg(regionRef, size, {
-            "packed-image": true,
-            "packed-stroke": false,
-            "packed-label": true,
-            "packed-hit": false,
-          }),
-        },
-        {
-          name: "packed_noimage_stroke_nolabel",
-          svg: captureStageSvg(regionRef, size, {
-            "packed-image": false,
-            "packed-stroke": true,
-            "packed-label": false,
-            "packed-hit": false,
-          }),
-        },
+          {
+            name: "zone_image",
+            svg: zoneLabelsSvg(
+              captureStageSvg(zoneRef, size, {
+                "zone-image": true,
+                "zone-overlay": true,
+                "zone-stroke": true,
+                "zone-label": true,
+                "zone-hit": false,
+              })
+            ),
+          },
+          {
+            name: "zone_noimage",
+            svg: zoneLabelsSvg(
+              captureStageSvg(zoneRef, size, {
+                "zone-image": false,
+                "zone-overlay": true,
+                "zone-stroke": true,
+                "zone-label": true,
+                "zone-hit": false,
+              })
+            ),
+          },
+          {
+            name: "packed_image_nostroke",
+            svg: captureStageSvg(regionRef, size, {
+              "packed-image": true,
+              "packed-overlay": true,
+              "packed-stroke": false,
+              "packed-label": true,
+              "packed-hit": false,
+            }),
+          },
+          {
+            name: "packed_noimage_stroke_nolabel",
+            svg: captureStageSvg(regionRef, size, {
+              "packed-image": false,
+              "packed-overlay": true,
+              "packed-stroke": true,
+              "packed-label": false,
+              "packed-hit": false,
+            }),
+          },
       ];
       const res = await fetch("/api/export_pdf", {
         method: "POST",
@@ -1253,13 +1848,35 @@ export default function App() {
         const data = await res.json().catch(() => ({}));
         throw new Error(data.error || `export failed: ${res.status}`);
       }
-      const data = await res.json().catch(() => ({}));
-      if (data?.name) {
-        setExportPdfInfo({ name: data.name });
-      }
-      setExportMsg("Export PDF Done");
-      setTimeout(() => setExportMsg(""), 3000);
-    } catch (err) {
+        const data = await res.json().catch(() => ({}));
+        if (data?.name) {
+          setExportPdfInfo({ name: data.name });
+        }
+        const htmlNames = [];
+        try {
+          const baseName = data?.name
+            ? data.name.replace(/\.pdf$/i, "")
+            : "convoi";
+          const html0 = buildSimulateHtml(scene, packedLabels, labelFontFamily, labelFontSize);
+          if (html0) {
+            const name0 = `${baseName}_simulate.html`;
+            await fetch("/api/save_html", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                name: name0,
+                html: html0,
+              }),
+            });
+            htmlNames.push(name0);
+          }
+        } catch {
+          // ignore html export errors
+        }
+        setExportHtmlInfo(htmlNames);
+        setExportMsg("Export PDF Done");
+        setTimeout(() => setExportMsg(""), 3000);
+      } catch (err) {
       setError(err.message || String(err));
     } finally {
       setExportPdfLoading(false);
@@ -1395,17 +2012,28 @@ export default function App() {
         return;
       }
 
-      if (className === "Circle") {
-        const r = node.radius?.();
-        if (!r) return;
-        const attrs = { ...common, cx: 0, cy: 0, r };
-        parts.push(`<circle ${pushAttrs(attrs)} />`);
-        return;
-      }
+        if (className === "Circle") {
+          const r = node.radius?.();
+          if (!r) return;
+          const attrs = { ...common, cx: 0, cy: 0, r };
+          parts.push(`<circle ${pushAttrs(attrs)} />`);
+          return;
+        }
 
-      if (className === "Text") {
-        const text = node.text?.();
-        if (text == null) return;
+        if (className === "Image") {
+          const img = node.image?.();
+          const src = img?.src;
+          const w = node.width?.();
+          const h = node.height?.();
+          if (!src || !w || !h) return;
+          const attrs = { ...common, x: 0, y: 0, width: w, height: h, href: src };
+          parts.push(`<image ${pushAttrs(attrs)} />`);
+          return;
+        }
+
+        if (className === "Text") {
+          const text = node.text?.();
+          if (text == null) return;
         const absPos = node.getAbsolutePosition?.() || { x: 0, y: 0 };
         const attrs = {
           fill: common.fill,
@@ -1678,29 +2306,95 @@ export default function App() {
             >
               Simulate
             </button>
-            <button
-              className={edgeMode ? "active" : ""}
-              onClick={() => {
-                setEdgeMode((v) => !v);
-                setEdgeCandidate(null);
-              }}
-            >
-              Create Edge
-            </button>
-            <div className="toolbar-spacer" />
+              <div className="toolbar-spacer" />
             {exportMsg ? <div className="meta">{exportMsg}</div> : null}
             {error ? <div className="error">{error}</div> : null}
           </div>
 
           <div className={`left ${sceneLoading ? "is-loading" : ""}`} ref={leftRef}>
-          <div className="preview-header">
-            <div className="preview-title">Source (Konva)</div>
-            <div className="preview-controls">
-              <button
-                className="icon-button"
-                title="Download"
-                onClick={() =>
-                  downloadStage(stageRef, "source-konva.svg", scene?.canvas || null)
+            <div className="preview-header">
+              <div className="preview-title">Source (Konva)</div>
+              <div className="preview-controls">
+                <button
+                  className={`icon-button ${edgeMode ? "active" : ""}`}
+                  title="Create Edge"
+                  onClick={() => {
+                    setEdgeMode((v) => !v);
+                    setAddNodeMode(false);
+                    setDeleteEdgeMode(false);
+                    setEdgeCandidate(null);
+                    setDeleteEdgeCandidate(null);
+                  }}
+                >
+                  <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+                    <circle cx="4" cy="4" r="2" fill="currentColor" />
+                    <circle cx="16" cy="16" r="2" fill="currentColor" />
+                    <line x1="5.5" y1="5.5" x2="14.5" y2="14.5" stroke="currentColor" strokeWidth="2" />
+                  </svg>
+                </button>
+                <button
+                  className={`icon-button ${addNodeMode ? "active" : ""}`}
+                  title="Add Node"
+                  onClick={() => {
+                    setAddNodeMode((v) => !v);
+                    setEdgeMode(false);
+                    setDeleteEdgeMode(false);
+                    setEdgeCandidate(null);
+                    setDeleteEdgeCandidate(null);
+                  }}
+                >
+                  <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+                    <circle cx="10" cy="10" r="3" fill="currentColor" />
+                    <line x1="10" y1="4" x2="10" y2="16" stroke="currentColor" strokeWidth="2" />
+                    <line x1="4" y1="10" x2="16" y2="10" stroke="currentColor" strokeWidth="2" />
+                  </svg>
+                </button>
+                <button
+                  className={`icon-button ${deleteEdgeMode ? "active" : ""}`}
+                  title="Delete Edge"
+                  onClick={() => {
+                    setDeleteEdgeMode((v) => !v);
+                    setEdgeMode(false);
+                    setAddNodeMode(false);
+                    setEdgeCandidate(null);
+                    setDeleteEdgeCandidate(null);
+                  }}
+                >
+                  <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+                    <line x1="4" y1="4" x2="16" y2="16" stroke="currentColor" strokeWidth="2" />
+                    <line x1="16" y1="4" x2="4" y2="16" stroke="currentColor" strokeWidth="2" />
+                  </svg>
+                </button>
+                <button className="icon-button" title="Overlay" onClick={handleOverlayPick}>
+                  <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+                    <rect x="3" y="4" width="12" height="10" rx="1" ry="1" stroke="currentColor" strokeWidth="2" fill="none" />
+                    <rect x="7" y="6" width="10" height="10" rx="1" ry="1" stroke="currentColor" strokeWidth="2" fill="none" opacity="0.7" />
+                  </svg>
+                </button>
+                <input
+                  ref={overlayInputRef}
+                  type="file"
+                  accept=".svg"
+                  style={{ display: "none" }}
+                  onChange={handleOverlayFileChange}
+                />
+                <label className="mini-input">
+                  Overlay Fill
+                  <input
+                    type="color"
+                    value={overlayFill}
+                    onChange={(e) => {
+                      const color = e.target.value;
+                      setOverlayFill(color);
+                      if (selectedOverlayId) updateOverlayColor(selectedOverlayId, color);
+                    }}
+                  />
+                </label>
+                <button
+                  className="icon-button"
+                  title="Download"
+                  onClick={() =>
+                    downloadStage(stageRef, "source-konva.svg", scene?.canvas || null)
                 }
               >
                 {"\u2193"}
@@ -1716,36 +2410,80 @@ export default function App() {
             x={pos.x}
             y={pos.y}
             onWheel={handleWheel}
-            onMouseMove={(e) => {
-              if (!edgeMode) return;
-              const stage = stageRef.current;
-              const pointer = stage.getPointerPosition();
-              if (!pointer) return;
-              const world = {
-                x: (pointer.x - pos.x) / scale,
-                y: (pointer.y - pos.y) / scale,
-              };
-              const cand = findEdgeCandidate(world);
-              setEdgeCandidate(cand);
-            }}
-            onMouseLeave={() => {
-              if (edgeMode) setEdgeCandidate(null);
-            }}
-            onMouseDown={() => {
-              if (!edgeMode || !edgeCandidate) return;
-              const key = edgeKey(edgeCandidate.a, edgeCandidate.b);
-              const segSet = new Set(segs.map(([a, b]) => edgeKey(a, b)));
-              if (segSet.has(key)) return;
-              const nextSegs = [...segs, [edgeCandidate.a, edgeCandidate.b]];
-              setSegs(nextSegs);
-              fetch("/api/save_svg", {
-                method: "POST",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ nodes, segs: nextSegs }),
-              }).then(() => loadScene(false));
-            }}
-            ref={stageRef}
-          >
+            onMouseMove={() => {
+                const stage = stageRef.current;
+                const pointer = stage.getPointerPosition();
+                if (!pointer) return;
+                const world = {
+                  x: (pointer.x - pos.x) / scale,
+                  y: (pointer.y - pos.y) / scale,
+                };
+                if (edgeMode) {
+                  const cand = findEdgeCandidate(world);
+                  setEdgeCandidate(cand);
+                  setDeleteEdgeCandidate(null);
+                } else if (deleteEdgeMode) {
+                  const cand = findExistingEdgeCandidate(world);
+                  setDeleteEdgeCandidate(cand);
+                  setEdgeCandidate(null);
+                } else {
+                  setEdgeCandidate(null);
+                  setDeleteEdgeCandidate(null);
+                }
+              }}
+              onMouseLeave={() => {
+                if (edgeMode) setEdgeCandidate(null);
+                if (deleteEdgeMode) setDeleteEdgeCandidate(null);
+              }}
+              onMouseDown={() => {
+                const stage = stageRef.current;
+                const pointer = stage.getPointerPosition();
+                if (!pointer) return;
+                const world = {
+                  x: (pointer.x - pos.x) / scale,
+                  y: (pointer.y - pos.y) / scale,
+                };
+                if (edgeMode) {
+                  if (!edgeCandidate) return;
+                  const key = edgeKey(edgeCandidate.a, edgeCandidate.b);
+                  const segSet = new Set(segs.map(([a, b]) => edgeKey(a, b)));
+                  if (segSet.has(key)) return;
+                  const nextSegs = [...segs, [edgeCandidate.a, edgeCandidate.b]];
+                  setSegs(nextSegs);
+                  saveSvg(nodes, nextSegs, overlayItems).then(() => loadScene(false, false, false));
+                  return;
+                }
+                if (deleteEdgeMode) {
+                  if (!deleteEdgeCandidate) return;
+                  const nextSegs = segs.filter((_, idx) => idx !== deleteEdgeCandidate.idx);
+                  const pruned = pruneIsolatedNodes(nodes, nextSegs);
+                  setNodes(pruned.nodes);
+                  setSegs(pruned.segs);
+                  saveSvg(pruned.nodes, pruned.segs, overlayItems).then(() => loadScene(false, false, false));
+                  return;
+                }
+                if (addNodeMode) {
+                  const nextNodes = [...nodes, { id: nodes.length, x: world.x, y: world.y }];
+                  let nextSegs = [...segs];
+                  if (nodes.length) {
+                    let nearest = 0;
+                    let best = Infinity;
+                    nodes.forEach((n, idx) => {
+                      const d = Math.hypot(n.x - world.x, n.y - world.y);
+                      if (d < best) {
+                        best = d;
+                        nearest = idx;
+                      }
+                    });
+                    nextSegs.push([nextNodes.length - 1, nearest]);
+                  }
+                  setNodes(nextNodes);
+                  setSegs(nextSegs);
+                  saveSvg(nextNodes, nextSegs, overlayItems).then(() => loadScene(false, false, false));
+                }
+              }}
+              ref={stageRef}
+            >
         <Layer>
           {scene?.canvas ? (
             <Rect
@@ -1759,35 +2497,125 @@ export default function App() {
             />
           ) : null}
         </Layer>
-        <Layer>{nodeLayer}</Layer>
-        <Layer>{borderLayer}</Layer>
-        {edgeCandidate ? (
-          <Layer>
-            <Line
-              points={[
-                nodes[edgeCandidate.a].x,
-                nodes[edgeCandidate.a].y,
-                nodes[edgeCandidate.b].x,
-                nodes[edgeCandidate.b].y,
+          <Layer>{nodeLayer}</Layer>
+          <Layer>{borderLayer}</Layer>
+          {edgeCandidate ? (
+            <Layer>
+              <Line
+                points={[
+                  nodes[edgeCandidate.a].x,
+                  nodes[edgeCandidate.a].y,
+                  nodes[edgeCandidate.b].x,
+                  nodes[edgeCandidate.b].y,
+                ]}
+                stroke="#cfd6ff"
+                opacity={0.4}
+                strokeWidth={(1 / scale) * 2}
+                strokeScaleEnabled={false}
+              />
+            </Layer>
+          ) : null}
+          {deleteEdgeCandidate ? (
+            <Layer>
+              <Line
+                points={[
+                  nodes[deleteEdgeCandidate.a].x,
+                  nodes[deleteEdgeCandidate.a].y,
+                  nodes[deleteEdgeCandidate.b].x,
+                  nodes[deleteEdgeCandidate.b].y,
+                ]}
+                stroke="#ff3b30"
+                opacity={0.6}
+                strokeWidth={(1 / scale) * 2}
+                strokeScaleEnabled={false}
+              />
+            </Layer>
+          ) : null}
+          <Layer name="source-overlay">
+            {overlayItems.map((item) =>
+              item.img ? (
+                <Image
+                  key={item.id}
+                  image={item.img}
+                  x={item.x}
+                  y={item.y}
+                  width={item.width}
+                  height={item.height}
+                  offsetX={item.width / 2}
+                  offsetY={item.height / 2}
+                  scaleX={item.scaleX}
+                  scaleY={item.scaleY}
+                  rotation={item.rotation}
+                  draggable={!edgeMode && !deleteEdgeMode && !addNodeMode}
+                  onClick={() => setSelectedOverlayId(item.id)}
+                  onTap={() => setSelectedOverlayId(item.id)}
+                  onDragEnd={(e) => {
+                    const nx = e.target.x();
+                    const ny = e.target.y();
+                    const zid = findZoneAtPoint({ x: nx, y: ny });
+                    const next = overlayItems.map((o) =>
+                      o.id === item.id ? { ...o, x: nx, y: ny, zid } : o
+                    );
+                    setOverlayItems(next);
+                    saveSvg(nodes, segs, next);
+                  }}
+                  onTransformEnd={() => {
+                    const node = overlayNodeRefs.current[item.id];
+                    if (!node) return;
+                    const scaleX = node.scaleX();
+                    const scaleY = node.scaleY();
+                    const rotation = node.rotation();
+                    const nx = node.x();
+                    const ny = node.y();
+                    node.scaleX(1);
+                    node.scaleY(1);
+                    const next = overlayItems.map((o) =>
+                      o.id === item.id
+                        ? {
+                            ...o,
+                            x: nx,
+                            y: ny,
+                            rotation,
+                            scaleX: o.scaleX * scaleX,
+                            scaleY: o.scaleY * scaleY,
+                          }
+                        : o
+                    );
+                    setOverlayItems(next);
+                    saveSvg(nodes, segs, next);
+                  }}
+                  ref={(node) => {
+                    if (node) overlayNodeRefs.current[item.id] = node;
+                  }}
+                />
+              ) : null
+            )}
+            <Transformer
+              ref={overlayTransformerRef}
+              rotateEnabled
+              enabledAnchors={[
+                "top-left",
+                "top-right",
+                "bottom-left",
+                "bottom-right",
               ]}
-              stroke="#cfd6ff"
-              opacity={0.4}
-              strokeWidth={(1 / scale) * 2}
-              strokeScaleEnabled={false}
+              boundBoxFunc={(oldBox, newBox) => {
+                if (newBox.width < 10 || newBox.height < 10) return oldBox;
+                return newBox;
+              }}
             />
           </Layer>
-        ) : null}
         <Layer>
           {nodes.map((n) => (
-            <Circle
-              key={`n-${n.id}`}
-              x={n.x}
-              y={n.y}
-              radius={3 / scale}
-              fill="red"
-              strokeScaleEnabled={false}
-              draggable={!edgeMode}
-              onDragMove={(e) => {
+              <Circle
+                key={`n-${n.id}`}
+                x={n.x}
+                y={n.y}
+                radius={3 / scale}
+                fill="red"
+                strokeScaleEnabled={false}
+                draggable={!edgeMode && !deleteEdgeMode && !addNodeMode}
+                onDragMove={(e) => {
                 const next = nodes.map((p) =>
                   p.id === n.id ? { ...p, x: e.target.x(), y: e.target.y() } : p
                 );
@@ -1800,11 +2628,7 @@ export default function App() {
                 const merged = mergeNodesIfClose(next, segs, n.id, snap);
                 setNodes(merged.nodes);
                 setSegs(merged.segs);
-                fetch("/api/save_svg", {
-                  method: "POST",
-                  headers: { "Content-Type": "application/json" },
-                  body: JSON.stringify({ nodes: merged.nodes, segs: merged.segs }),
-                }).then(() => loadScene(false));
+                saveSvg(merged.nodes, merged.segs, overlayItems).then(() => loadScene(false, false, false));
               }}
             />
           ))}
@@ -1986,6 +2810,33 @@ export default function App() {
                     </Group>
                   </>
                 </Layer>
+                <Layer name="packed-overlay">
+                  {overlayItems.map((item) => {
+                    if (!item?.img || item.zid == null) return null;
+                    const packed = transformOverlayToPacked(item);
+                    const bin =
+                      scene?.placement_bin?.[item.zid] ??
+                      scene?.placement_bin?.[parseInt(item.zid, 10)];
+                    const page = bin === 1 ? 1 : 0;
+                    const xOffset = page === 1 ? (scene?.canvas?.w || 0) + 40 : 0;
+                    return (
+                      <Image
+                        key={`po-${item.id}`}
+                        image={packed.img}
+                        x={packed.x + xOffset}
+                        y={packed.y}
+                        width={packed.width}
+                        height={packed.height}
+                        offsetX={packed.width / 2}
+                        offsetY={packed.height / 2}
+                        scaleX={packed.scaleX}
+                        scaleY={packed.scaleY}
+                        rotation={packed.rotation}
+                        listening={false}
+                      />
+                    );
+                  })}
+                </Layer>
                 <Layer name="packed-stroke" visible={showStroke}>
                   {Object.entries(scene.zone_boundaries || {}).flatMap(([zid, paths]) => {
                     const bin =
@@ -2104,6 +2955,14 @@ export default function App() {
                 <div className="preview-title">Region (Konva)</div>
                 <div className="preview-controls">
                   <button
+                    className="btn"
+                    onClick={() => {
+                      saveSvg(nodes, segs, overlayItems).then(() => loadScene(false, false, true));
+                    }}
+                  >
+                    Save
+                  </button>
+                  <button
                     className="icon-button"
                     title="Download"
                     onClick={() =>
@@ -2158,11 +3017,17 @@ export default function App() {
             </div>
             <div className={`preview half ${sceneLoading ? "is-loading" : ""}`} ref={zoneWrapRef}>
               <div className="preview-header">
-                <div className="preview-title">Zone (Konva)</div>
-                <div className="preview-controls">
-                  <button
-                    className="icon-button"
-                    title="Download"
+              <div className="preview-title">Zone (Konva)</div>
+              <div className="preview-controls">
+                <button
+                  className="btn"
+                  onClick={() => loadScene(false, true, false)}
+                >
+                  Compute
+                </button>
+                <button
+                  className="icon-button"
+                  title="Download"
                     onClick={() =>
                       downloadStage(zoneRef, "zone-konva.svg", scene?.canvas || null)
                     }
@@ -2171,7 +3036,7 @@ export default function App() {
                   </button>
                 </div>
               </div>
-              {scene ? (
+              {zoneScene || scene ? (
                 <Stage
                   width={zoneStageSize.w}
                   height={zoneStageSize.h}
@@ -2184,33 +3049,54 @@ export default function App() {
                   ref={zoneRef}
                 >
                   <Layer>
-                    {scene?.canvas ? (
-                      <Rect
-                        x={0}
-                        y={0}
-                        width={scene.canvas.w}
-                        height={scene.canvas.h}
-                        stroke="#ffffff"
-                        strokeWidth={2 / zoneScale}
-                        listening={false}
+              {zoneScene?.canvas || scene?.canvas ? (
+                  <Rect
+                    x={0}
+                    y={0}
+                    width={(zoneScene || scene).canvas.w}
+                    height={(zoneScene || scene).canvas.h}
+                    stroke="#ffffff"
+                    strokeWidth={2 / zoneScale}
+                    listening={false}
+                  />
+                ) : null}
+              </Layer>
+              <Layer name="zone-image" visible={showImages}>
+                {(zoneScene || scene).region_colors
+                  ? (zoneScene || scene).regions.map((poly, idx) => (
+                      <Line
+                        key={`zf-${idx}`}
+                        points={toPoints(poly)}
+                        closed
+                        fill={(zoneScene || scene).region_colors[idx]}
+                        strokeScaleEnabled={false}
                       />
-                    ) : null}
-                  </Layer>
-                  <Layer name="zone-image" visible={showImages}>
-                    {scene.region_colors
-                      ? scene.regions.map((poly, idx) => (
-                          <Line
-                            key={`zf-${idx}`}
-                            points={toPoints(poly)}
-                            closed
-                            fill={scene.region_colors[idx]}
-                            strokeScaleEnabled={false}
-                          />
-                        ))
-                      : null}
+                    ))
+                  : null}
+              </Layer>
+              <Layer name="zone-overlay">
+                {overlayItems.map((item) =>
+                  item?.img ? (
+                    <Image
+                      key={`zo-${item.id}`}
+                      image={item.img}
+                          x={item.x}
+                          y={item.y}
+                          width={item.width}
+                          height={item.height}
+                          offsetX={item.width / 2}
+                          offsetY={item.height / 2}
+                          scaleX={item.scaleX}
+                          scaleY={item.scaleY}
+                          rotation={item.rotation}
+                          listening={false}
+                        />
+                      ) : null
+                    )}
                   </Layer>
                   <Layer name="zone-stroke">
-                    {Object.entries(scene.zone_boundaries || {}).flatMap(([zid, paths]) =>
+                    {Object.entries((zoneScene || scene).zone_boundaries || {}).flatMap(
+                      ([zid, paths]) =>
                       paths.map((p, i) => (
                         <Line
                           key={`zb2-${zid}-${i}`}
@@ -2223,10 +3109,10 @@ export default function App() {
                     )}
                   </Layer>
                   <Layer name="zone-label" visible={showLabels}>
-                    {Object.values(scene.zone_labels || {}).map((lbl) => {
+                    {Object.values((zoneScene || scene).zone_labels || {}).map((lbl) => {
                       const selectedShuffle =
-                        scene?.zone_label_map?.[selectedZoneId] ??
-                        scene?.zone_label_map?.[parseInt(selectedZoneId, 10)];
+                        (zoneScene || scene)?.zone_label_map?.[selectedZoneId] ??
+                        (zoneScene || scene)?.zone_label_map?.[parseInt(selectedZoneId, 10)];
                       const targetLabel = selectedShuffle != null ? selectedShuffle : selectedZoneId;
                       const isSelected = String(lbl.label) === String(targetLabel);
                       const size = Math.max(labelFontSize / zoneScale, 6 / zoneScale);
@@ -2280,6 +3166,17 @@ export default function App() {
                 >
                   Download PDF
                 </button>
+                {exportHtmlInfo.map((name) => (
+                  <button
+                    key={name}
+                    className="btn"
+                    onClick={() => {
+                      window.location = `/api/download_html?name=${encodeURIComponent(name)}`;
+                    }}
+                  >
+                    Download HTML
+                  </button>
+                ))}
               </div>
             ) : null}
           </div>

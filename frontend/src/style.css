@@ -170,20 +170,22 @@ body {
 }
 
 .sim-modal {
-  width: 90vw;
-  height: 90vh;
+  width: 100vw;
+  height: 100vh;
   display: flex;
   flex-direction: column;
   position: relative;
+  padding: 0;
+  border-radius: 0;
 }
 
 .sim-body {
   flex: 1;
   background: rgba(10, 14, 28, 0.9);
-  border-radius: 10px;
+  border-radius: 0;
   overflow: hidden;
   position: relative;
-  padding: 4px;
+  padding: 0;
 }
 
 .sim-controls {
