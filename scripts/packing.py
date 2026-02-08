@@ -2154,9 +2154,6 @@ def main() -> None:
     placement_bin = [int(info.get("bin", -1)) for info in rot_info]
     order_page0 = [i for i, b in enumerate(placement_bin) if b == 0]
     order_page1 = [i for i, b in enumerate(placement_bin) if b == 1]
-    placement_bin_by_zid = {
-        zid: placement_bin[idx] for idx, zid in enumerate(zone_order) if idx < len(placement_bin)
-    }
     write_pack_bbox_svg(
         placements,
         rot_info,
