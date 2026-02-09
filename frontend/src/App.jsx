@@ -570,6 +570,183 @@ const splitAtIntersections = (segments) => {
   return out;
 };
 
+const snapKey = (pt, eps) => {
+  if (!eps || eps <= 0) return `${Math.round(pt[0])},${Math.round(pt[1])}`;
+  return `${Math.round(pt[0] / eps)},${Math.round(pt[1] / eps)}`;
+};
+
+const edgeKeyPts = (a, b) => (a < b ? `${a}|${b}` : `${b}|${a}`);
+
+const buildRegionAdjacency = (polys, eps = 0.5) => {
+  const edgeMap = new Map();
+  polys.forEach((pts, rid) => {
+    if (!pts || pts.length < 2) return;
+    for (let i = 0; i < pts.length; i++) {
+      const p1 = pts[i];
+      const p2 = pts[(i + 1) % pts.length];
+      const k1 = snapKey(p1, eps);
+      const k2 = snapKey(p2, eps);
+      if (k1 === k2) continue;
+      const ek = edgeKeyPts(k1, k2);
+      if (!edgeMap.has(ek)) edgeMap.set(ek, []);
+      edgeMap.get(ek).push(rid);
+    }
+  });
+  const adj = Array.from({ length: polys.length }, () => new Set());
+  for (const ids of edgeMap.values()) {
+    if (ids.length < 2) continue;
+    for (let i = 0; i < ids.length; i++) {
+      for (let j = i + 1; j < ids.length; j++) {
+        adj[ids[i]].add(ids[j]);
+        adj[ids[j]].add(ids[i]);
+      }
+    }
+  }
+  return adj.map((s) => Array.from(s));
+};
+
+const buildZoneBoundaries = (polys, zoneId, snap = 0) => {
+  const zones = new Map();
+  polys.forEach((pts, rid) => {
+    const zid = zoneId?.[rid] ?? -1;
+    if (!zones.has(zid)) zones.set(zid, []);
+    zones.get(zid).push(pts);
+  });
+
+  const zoneBoundaries = {};
+  zones.forEach((zpolys, zid) => {
+    const edgeCounts = new Map();
+    const pointSum = new Map();
+
+    const addPoint = (k, p) => {
+      const entry = pointSum.get(k);
+      if (!entry) {
+        pointSum.set(k, [p[0], p[1], 1]);
+      } else {
+        entry[0] += p[0];
+        entry[1] += p[1];
+        entry[2] += 1;
+      }
+    };
+
+    zpolys.forEach((pts) => {
+      if (!pts || pts.length < 2) return;
+      for (let i = 0; i < pts.length; i++) {
+        const p1 = pts[i];
+        const p2 = pts[(i + 1) % pts.length];
+        const k1 = snapKey(p1, snap);
+        const k2 = snapKey(p2, snap);
+        if (k1 === k2) continue;
+        addPoint(k1, p1);
+        addPoint(k2, p2);
+        const ek = edgeKeyPts(k1, k2);
+        const entry = edgeCounts.get(ek);
+        if (entry) {
+          entry.count += 1;
+        } else {
+          edgeCounts.set(ek, { count: 1, a: k1, b: k2 });
+        }
+      }
+    });
+
+    const boundaryEdges = [];
+    edgeCounts.forEach((entry) => {
+      if (entry.count === 1) boundaryEdges.push([entry.a, entry.b]);
+    });
+    if (!boundaryEdges.length) {
+      zoneBoundaries[zid] = [];
+      return;
+    }
+
+    const pointMap = new Map();
+    pointSum.forEach((val, key) => {
+      if (val[2] > 0) pointMap.set(key, [val[0] / val[2], val[1] / val[2]]);
+    });
+
+    const adj = new Map();
+    boundaryEdges.forEach(([k1, k2], idx) => {
+      if (!adj.has(k1)) adj.set(k1, []);
+      if (!adj.has(k2)) adj.set(k2, []);
+      adj.get(k1).push(idx);
+      adj.get(k2).push(idx);
+    });
+
+    const used = new Array(boundaryEdges.length).fill(false);
+    const polylines = [];
+
+    const nextEdge = (curKey, prevKey) => {
+      const candidates = (adj.get(curKey) || []).filter((ei) => !used[ei]);
+      if (!candidates.length) return null;
+      if (!prevKey) return candidates[0];
+      const pcur = pointMap.get(curKey);
+      const pprev = pointMap.get(prevKey);
+      if (!pcur || !pprev) return candidates[0];
+      const vx = pcur[0] - pprev[0];
+      const vy = pcur[1] - pprev[1];
+      const vlen = Math.hypot(vx, vy);
+      if (vlen === 0) return candidates[0];
+      let best = candidates[0];
+      let bestDot = -1e9;
+      for (const ei of candidates) {
+        const [a, b] = boundaryEdges[ei];
+        const nxt = a === curKey ? b : a;
+        const pnxt = pointMap.get(nxt);
+        if (!pnxt) continue;
+        const wx = pnxt[0] - pcur[0];
+        const wy = pnxt[1] - pcur[1];
+        const wlen = Math.hypot(wx, wy);
+        if (wlen === 0) continue;
+        const dot = (vx * wx + vy * wy) / (vlen * wlen);
+        if (dot > bestDot) {
+          bestDot = dot;
+          best = ei;
+        }
+      }
+      return best;
+    };
+
+    for (let i = 0; i < boundaryEdges.length; i++) {
+      if (used[i]) continue;
+      used[i] = true;
+      const [k1, k2] = boundaryEdges[i];
+      const pathKeys = [k1, k2];
+
+      while (true) {
+        const cur = pathKeys[pathKeys.length - 1];
+        const prev = pathKeys.length >= 2 ? pathKeys[pathKeys.length - 2] : null;
+        const ei = nextEdge(cur, prev);
+        if (ei == null) break;
+        used[ei] = true;
+        const [a, b] = boundaryEdges[ei];
+        const nxt = a === cur ? b : a;
+        if (nxt === pathKeys[pathKeys.length - 1]) break;
+        pathKeys.push(nxt);
+        if (nxt === pathKeys[0]) break;
+      }
+
+      while (true) {
+        const cur = pathKeys[0];
+        const prev = pathKeys.length >= 2 ? pathKeys[1] : null;
+        const ei = nextEdge(cur, prev);
+        if (ei == null) break;
+        used[ei] = true;
+        const [a, b] = boundaryEdges[ei];
+        const nxt = a === cur ? b : a;
+        if (nxt === pathKeys[0]) break;
+        pathKeys.unshift(nxt);
+        if (nxt === pathKeys[pathKeys.length - 1]) break;
+      }
+
+      const pathPts = pathKeys.map((k) => pointMap.get(k)).filter(Boolean);
+      if (pathPts.length >= 2) polylines.push(pathPts);
+    }
+
+    zoneBoundaries[zid] = polylines;
+  });
+
+  return zoneBoundaries;
+};
+
 export default function App() {
   const [snap, setSnap] = useState(1);
   const [scene, setScene] = useState(null);
@@ -600,6 +777,7 @@ export default function App() {
   const overlayInputRef = useRef(null);
   const overlayTransformerRef = useRef(null);
   const overlayNodeRefs = useRef({});
+  const regionNeighborCursorRef = useRef({});
   const [scale, setScale] = useState(1);
   const [pos, setPos] = useState({ x: 0, y: 0 });
   const [stageSize, setStageSize] = useState({ w: 800, h: 600 });
@@ -618,6 +796,11 @@ export default function App() {
   const [zoneScale, setZoneScale] = useState(1);
   const [zonePos, setZonePos] = useState({ x: 0, y: 0 });
   const [zoneStageSize, setZoneStageSize] = useState({ w: 300, h: 200 });
+  const neighborSnap = 0.5;
+  const regionAdj = useMemo(
+    () => buildRegionAdjacency((zoneScene || scene)?.regions || [], neighborSnap),
+    [zoneScene, scene]
+  );
   const [autoFit, setAutoFit] = useState(true);
   const [showImages, setShowImages] = useState(false);
   const [showStroke, setShowStroke] = useState(true);
@@ -1740,6 +1923,37 @@ export default function App() {
       if (String(info?.label) === target) return String(zid);
     }
     return target;
+  };
+
+  const handleZoneRegionClick = (rid) => {
+    const source = zoneScene || scene;
+    if (!source?.regions || !source?.zone_id) return;
+    if (rid == null || rid < 0 || rid >= source.regions.length) return;
+    const currentZid = source.zone_id[rid];
+    const neighbors = regionAdj?.[rid] || [];
+    if (!neighbors.length) return;
+    const neighborZids = [];
+    const seen = new Set();
+    for (const nb of neighbors) {
+      const zid = source.zone_id[nb];
+      if (zid == null) continue;
+      if (String(zid) === String(currentZid)) continue;
+      const key = String(zid);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      neighborZids.push(zid);
+    }
+    if (!neighborZids.length) return;
+    neighborZids.sort((a, b) => Number(a) - Number(b));
+    const cursor = regionNeighborCursorRef.current[rid] || 0;
+    const targetZid = neighborZids[cursor % neighborZids.length];
+    regionNeighborCursorRef.current[rid] = (cursor + 1) % neighborZids.length;
+
+    const nextZoneId = source.zone_id.slice();
+    nextZoneId[rid] = targetZid;
+    const nextBoundaries = buildZoneBoundaries(source.regions, nextZoneId, 0);
+    setZoneScene({ ...source, zone_id: nextZoneId, zone_boundaries: nextBoundaries });
+    setSelectedZoneId(String(targetZid));
   };
 
   const transformOverlayToPacked = (item) => {
@@ -3108,6 +3322,8 @@ export default function App() {
                         closed
                         fill={(zoneScene || scene).region_colors[idx]}
                         strokeScaleEnabled={false}
+                        onClick={() => handleZoneRegionClick(idx)}
+                        onTap={() => handleZoneRegionClick(idx)}
                       />
                     ))
                   : null}
