@@ -778,6 +778,8 @@ export default function App() {
   const overlayTransformerRef = useRef(null);
   const overlayNodeRefs = useRef({});
   const regionNeighborCursorRef = useRef({});
+  const [mainViewScale, setMainViewScale] = useState(1);
+  const [mainViewPos, setMainViewPos] = useState({ x: 0, y: 0 });
   const [scale, setScale] = useState(1);
   const [pos, setPos] = useState({ x: 0, y: 0 });
   const [stageSize, setStageSize] = useState({ w: 800, h: 600 });
@@ -796,6 +798,7 @@ export default function App() {
   const [zoneScale, setZoneScale] = useState(1);
   const [zonePos, setZonePos] = useState({ x: 0, y: 0 });
   const [zoneStageSize, setZoneStageSize] = useState({ w: 300, h: 200 });
+  const [leftTab, setLeftTab] = useState("source");
   const neighborSnap = 0.5;
   const regionAdj = useMemo(
     () => buildRegionAdjacency((zoneScene || scene)?.regions || [], neighborSnap),
@@ -1099,6 +1102,24 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    const raf = requestAnimationFrame(() => {
+      if (leftTab === "source" && leftRef.current) {
+        const rect = leftRef.current.getBoundingClientRect();
+        setStageSize({ w: Math.max(300, rect.width), h: Math.max(300, rect.height) });
+      }
+      if (leftTab === "region" && region2WrapRef.current) {
+        const rect = region2WrapRef.current.getBoundingClientRect();
+        setRegion2StageSize({ w: Math.max(200, rect.width), h: Math.max(200, rect.height) });
+      }
+      if (leftTab === "zone" && zoneWrapRef.current) {
+        const rect = zoneWrapRef.current.getBoundingClientRect();
+        setZoneStageSize({ w: Math.max(200, rect.width), h: Math.max(200, rect.height) });
+      }
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [leftTab]);
+
+  useEffect(() => {
     const updateSimSize = () => {
       if (!simWrapRef.current) return;
       const rect = simWrapRef.current.getBoundingClientRect();
@@ -1108,6 +1129,35 @@ export default function App() {
     window.addEventListener("resize", updateSimSize);
     return () => window.removeEventListener("resize", updateSimSize);
   }, []);
+
+  const fitMainViewToView = (bounds) => {
+    let viewW, viewH;
+    if (leftTab === "source") {
+      const rect = leftRef.current?.getBoundingClientRect();
+      viewW = rect?.width || stageSize.w;
+      viewH = rect?.height || stageSize.h;
+    } else if (leftTab === "region") {
+      const rect = region2WrapRef.current?.getBoundingClientRect();
+      viewW = rect?.width || region2StageSize.w;
+      viewH = rect?.height || region2StageSize.h;
+    } else {
+      // zone
+      const rect = zoneWrapRef.current?.getBoundingClientRect();
+      viewW = rect?.width || zoneStageSize.w;
+      viewH = rect?.height || zoneStageSize.h;
+    }
+
+    const w = bounds.maxx - bounds.minx;
+    const h = bounds.maxy - bounds.miny;
+    if (!w || !h || !viewW || !viewH) return;
+
+    const fitScale = Math.min(viewW / w, viewH / h) * 0.95;
+    setMainViewScale(fitScale);
+    setMainViewPos({
+      x: (viewW - w * fitScale) / 2 - bounds.minx * fitScale,
+      y: (viewH - h * fitScale) / 2 - bounds.miny * fitScale,
+    });
+  };
 
   const fitToView = (w, h) => {
     const viewW = stageSize.w;
@@ -1817,6 +1867,27 @@ export default function App() {
     });
   };
 
+  const handleMainViewWheel = (e) => {
+    e.evt.preventDefault();
+    const scaleBy = 1.05;
+    const stage = e.target.getStage ? e.target.getStage() : null;
+    if (!stage) return;
+    const oldScale = stage.scaleX();
+    const pointer = stage.getPointerPosition();
+    if (!pointer) return;
+    const mousePointTo = {
+      x: (pointer.x - stage.x()) / oldScale,
+      y: (pointer.y - stage.y()) / oldScale,
+    };
+    const direction = e.evt.deltaY > 0 ? 1 : -1;
+    const newScale = direction > 0 ? oldScale / scaleBy : oldScale * scaleBy;
+    setMainViewScale(newScale);
+    setMainViewPos({
+      x: pointer.x - mousePointTo.x * newScale,
+      y: pointer.y - mousePointTo.y * newScale,
+    });
+  };
+
   const segmentWouldIntersect = (aIdx, bIdx) => {
     if (!nodes[aIdx] || !nodes[bIdx]) return true;
     const a1 = [nodes[aIdx].x, nodes[aIdx].y];
@@ -1971,44 +2042,6 @@ export default function App() {
     };
   };
 
-  const handleRegion2Wheel = (e) => {
-    e.evt.preventDefault();
-    const scaleBy = 1.05;
-    const stage = region2Ref.current;
-    const oldScale = stage.scaleX();
-    const pointer = stage.getPointerPosition();
-    const mousePointTo = {
-      x: (pointer.x - stage.x()) / oldScale,
-      y: (pointer.y - stage.y()) / oldScale,
-    };
-    const direction = e.evt.deltaY > 0 ? 1 : -1;
-    const newScale = direction > 0 ? oldScale / scaleBy : oldScale * scaleBy;
-    setRegion2Scale(newScale);
-    setRegion2Pos({
-      x: pointer.x - mousePointTo.x * newScale,
-      y: pointer.y - mousePointTo.y * newScale,
-    });
-  };
-
-  const handleZoneWheel = (e) => {
-    e.evt.preventDefault();
-    const scaleBy = 1.05;
-    const stage = zoneRef.current;
-    const oldScale = stage.scaleX();
-    const pointer = stage.getPointerPosition();
-    const mousePointTo = {
-      x: (pointer.x - stage.x()) / oldScale,
-      y: (pointer.y - stage.y()) / oldScale,
-    };
-    const direction = e.evt.deltaY > 0 ? 1 : -1;
-    const newScale = direction > 0 ? oldScale / scaleBy : oldScale * scaleBy;
-    setZoneScale(newScale);
-    setZonePos({
-      x: pointer.x - mousePointTo.x * newScale,
-      y: pointer.y - mousePointTo.y * newScale,
-    });
-  };
-
   const saveState = async () => {
     if (!scene) return;
     await fetch("/api/state", {
@@ -2023,10 +2056,8 @@ export default function App() {
         labels,
         snap,
         view: {
-          source: { scale, pos },
+          mainView: { scale: mainViewScale, pos: mainViewPos },
           region: { scale: regionScale, pos: regionPos },
-          region2: { scale: region2Scale, pos: region2Pos },
-          zone: { scale: zoneScale, pos: zonePos },
         },
       }),
     });
@@ -2534,16 +2565,26 @@ export default function App() {
 
   useEffect(() => {
     if (autoFit && (scene?.canvas || scene?.regions?.length)) {
+      if (leftTab === 'region') {
+        fitMainViewToView(calcBounds(scene.regions || []));
+      } else if (leftTab === 'zone') {
+        fitMainViewToView(calcBoundsFromLines(scene.zone_boundaries));
+      } else {
+        if (scene?.canvas) {
+          fitMainViewToView({ minx: 0, miny: 0, maxx: scene.canvas.w, maxy: scene.canvas.h });
+        } else {
+          fitMainViewToView(calcBounds(scene.regions || []));
+        }
+      }
+
       if (scene?.canvas) {
         fitRegionToView({ minx: 0, miny: 0, maxx: scene.canvas.w, maxy: scene.canvas.h });
       } else {
         fitRegionToView(calcBounds(scene.regions || []));
       }
-      fitRegion2ToView(calcBounds(scene.regions || []));
-      fitZoneToView(calcBoundsFromLines(scene.zone_boundaries));
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scene, regionStageSize, region2StageSize, zoneStageSize, autoFit]);
+  }, [scene, stageSize, regionStageSize, region2StageSize, zoneStageSize, autoFit, leftTab]);
 
   return (
     <div className="app">
@@ -2561,350 +2602,571 @@ export default function App() {
             >
               Simulate
             </button>
-              <div className="toolbar-spacer" />
+            <div className="toolbar-spacer" />
             {exportMsg ? <div className="meta">{exportMsg}</div> : null}
             {error ? <div className="error">{error}</div> : null}
           </div>
 
-          <div className={`left ${sceneLoading ? "is-loading" : ""}`} ref={leftRef}>
-            <div className="preview-header">
-              <div className="preview-title">Source (Konva)</div>
-              <div className="preview-controls">
-                <button
-                  className={`icon-button ${edgeMode ? "active" : ""}`}
-                  title="Create Edge"
-                  onClick={() => {
-                    setEdgeMode((v) => !v);
-                    setAddNodeMode(false);
-                    setDeleteEdgeMode(false);
-                    setEdgeCandidate(null);
-                    setDeleteEdgeCandidate(null);
-                  }}
-                >
-                  <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
-                    <circle cx="4" cy="4" r="2" fill="currentColor" />
-                    <circle cx="16" cy="16" r="2" fill="currentColor" />
-                    <line x1="5.5" y1="5.5" x2="14.5" y2="14.5" stroke="currentColor" strokeWidth="2" />
-                  </svg>
-                </button>
-                <button
-                  className={`icon-button ${addNodeMode ? "active" : ""}`}
-                  title="Add Node"
-                  onClick={() => {
-                    setAddNodeMode((v) => !v);
-                    setEdgeMode(false);
-                    setDeleteEdgeMode(false);
-                    setEdgeCandidate(null);
-                    setDeleteEdgeCandidate(null);
-                  }}
-                >
-                  <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
-                    <circle cx="10" cy="10" r="3" fill="currentColor" />
-                    <line x1="10" y1="4" x2="10" y2="16" stroke="currentColor" strokeWidth="2" />
-                    <line x1="4" y1="10" x2="16" y2="10" stroke="currentColor" strokeWidth="2" />
-                  </svg>
-                </button>
-                <button
-                  className={`icon-button ${deleteEdgeMode ? "active" : ""}`}
-                  title="Delete Edge"
-                  onClick={() => {
-                    setDeleteEdgeMode((v) => !v);
-                    setEdgeMode(false);
-                    setAddNodeMode(false);
-                    setEdgeCandidate(null);
-                    setDeleteEdgeCandidate(null);
-                  }}
-                >
-                  <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
-                    <line x1="4" y1="4" x2="16" y2="16" stroke="currentColor" strokeWidth="2" />
-                    <line x1="16" y1="4" x2="4" y2="16" stroke="currentColor" strokeWidth="2" />
-                  </svg>
-                </button>
-                <button className="icon-button" title="Overlay" onClick={handleOverlayPick}>
-                  <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
-                    <rect x="3" y="4" width="12" height="10" rx="1" ry="1" stroke="currentColor" strokeWidth="2" fill="none" />
-                    <rect x="7" y="6" width="10" height="10" rx="1" ry="1" stroke="currentColor" strokeWidth="2" fill="none" opacity="0.7" />
-                  </svg>
-                </button>
-                <input
-                  ref={overlayInputRef}
-                  type="file"
-                  accept=".svg"
-                  style={{ display: "none" }}
-                  onChange={handleOverlayFileChange}
-                />
-                <label className="mini-input">
-                  Overlay Fill
+          <div className="panel view-tabs">
+            <button className={leftTab === 'source' ? 'active' : ''} onClick={() => setLeftTab('source')}>Source</button>
+            <button className={leftTab === 'region' ? 'active' : ''} onClick={() => setLeftTab('region')}>Region</button>
+            <button className={leftTab === 'zone' ? 'active' : ''} onClick={() => setLeftTab('zone')}>Zone</button>
+          </div>
+
+          {leftTab === 'source' && (
+            <div className={`left ${sceneLoading ? "is-loading" : ""}`} ref={leftRef}>
+              <div className="preview-header">
+                <div className="preview-title">Source (Konva)</div>
+                <div className="preview-controls">
+                  <button
+                    className={`icon-button ${edgeMode ? "active" : ""}`}
+                    title="Create Edge"
+                    onClick={() => {
+                      setEdgeMode((v) => !v);
+                      setAddNodeMode(false);
+                      setDeleteEdgeMode(false);
+                      setEdgeCandidate(null);
+                      setDeleteEdgeCandidate(null);
+                    }}
+                  >
+                    <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+                      <circle cx="4" cy="4" r="2" fill="currentColor" />
+                      <circle cx="16" cy="16" r="2" fill="currentColor" />
+                      <line x1="5.5" y1="5.5" x2="14.5" y2="14.5" stroke="currentColor" strokeWidth="2" />
+                    </svg>
+                  </button>
+                  <button
+                    className={`icon-button ${addNodeMode ? "active" : ""}`}
+                    title="Add Node"
+                    onClick={() => {
+                      setAddNodeMode((v) => !v);
+                      setEdgeMode(false);
+                      setDeleteEdgeMode(false);
+                      setEdgeCandidate(null);
+                      setDeleteEdgeCandidate(null);
+                    }}
+                  >
+                    <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+                      <circle cx="10" cy="10" r="3" fill="currentColor" />
+                      <line x1="10" y1="4" x2="10" y2="16" stroke="currentColor" strokeWidth="2" />
+                      <line x1="4" y1="10" x2="16" y2="10" stroke="currentColor" strokeWidth="2" />
+                    </svg>
+                  </button>
+                  <button
+                    className={`icon-button ${deleteEdgeMode ? "active" : ""}`}
+                    title="Delete Edge"
+                    onClick={() => {
+                      setDeleteEdgeMode((v) => !v);
+                      setEdgeMode(false);
+                      setAddNodeMode(false);
+                      setEdgeCandidate(null);
+                      setDeleteEdgeCandidate(null);
+                    }}
+                  >
+                    <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+                      <line x1="4" y1="4" x2="16" y2="16" stroke="currentColor" strokeWidth="2" />
+                      <line x1="16" y1="4" x2="4" y2="16" stroke="currentColor" strokeWidth="2" />
+                    </svg>
+                  </button>
+                  <button className="icon-button" title="Overlay" onClick={handleOverlayPick}>
+                    <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+                      <rect x="3" y="4" width="12" height="10" rx="1" ry="1" stroke="currentColor" strokeWidth="2" fill="none" />
+                      <rect x="7" y="6" width="10" height="10" rx="1" ry="1" stroke="currentColor" strokeWidth="2" fill="none" opacity="0.7" />
+                    </svg>
+                  </button>
                   <input
-                    type="color"
-                    value={overlayFill}
-                    onChange={(e) => {
-                      const color = e.target.value;
-                      setOverlayFill(color);
-                      if (selectedOverlayId) updateOverlayColor(selectedOverlayId, color);
+                    ref={overlayInputRef}
+                    type="file"
+                    accept=".svg"
+                    style={{ display: "none" }}
+                    onChange={handleOverlayFileChange}
+                  />
+                  <label className="mini-input">
+                    Overlay Fill
+                    <input
+                      type="color"
+                      value={overlayFill}
+                      onChange={(e) => {
+                        const color = e.target.value;
+                        setOverlayFill(color);
+                        if (selectedOverlayId) updateOverlayColor(selectedOverlayId, color);
+                      }}
+                    />
+                  </label>
+                  <button
+                    className="icon-button"
+                    title="Download"
+                    onClick={() =>
+                      downloadStage(stageRef, "source-konva.svg", scene?.canvas || null)
+                  }
+                  >
+                    {"\u2193"}
+                  </button>
+                </div>
+              </div>
+              <Stage
+                width={stageSize.w}
+                height={stageSize.h}
+                draggable
+                scaleX={mainViewScale}
+                scaleY={mainViewScale}
+                x={mainViewPos.x}
+                y={mainViewPos.y}
+                onWheel={handleMainViewWheel}
+                onMouseMove={() => {
+                    const stage = stageRef.current;
+                    const pointer = stage.getPointerPosition();
+                    if (!pointer) return;
+                    const world = {
+                      x: (pointer.x - mainViewPos.x) / mainViewScale,
+                      y: (pointer.y - mainViewPos.y) / mainViewScale,
+                    };
+                    if (edgeMode) {
+                      const cand = findEdgeCandidate(world);
+                      setEdgeCandidate(cand);
+                      setDeleteEdgeCandidate(null);
+                    } else if (deleteEdgeMode) {
+                      const cand = findExistingEdgeCandidate(world);
+                      setDeleteEdgeCandidate(cand);
+                      setEdgeCandidate(null);
+                    } else {
+                      setEdgeCandidate(null);
+                      setDeleteEdgeCandidate(null);
+                    }
+                  }}
+                  onMouseLeave={() => {
+                    if (edgeMode) setEdgeCandidate(null);
+                    if (deleteEdgeMode) setDeleteEdgeCandidate(null);
+                  }}
+                  onMouseDown={() => {
+                    const stage = stageRef.current;
+                    const pointer = stage.getPointerPosition();
+                    if (!pointer) return;
+                    const world = {
+                      x: (pointer.x - mainViewPos.x) / mainViewScale,
+                      y: (pointer.y - mainViewPos.y) / mainViewScale,
+                    };
+                    if (edgeMode) {
+                      if (!edgeCandidate) return;
+                      const key = edgeKey(edgeCandidate.a, edgeCandidate.b);
+                      const segSet = new Set(segs.map(([a, b]) => edgeKey(a, b)));
+                      if (segSet.has(key)) return;
+                      const nextSegs = [...segs, [edgeCandidate.a, edgeCandidate.b]];
+                      setSegs(nextSegs);
+                      return;
+                    }
+                    if (deleteEdgeMode) {
+                      if (!deleteEdgeCandidate) return;
+                      const nextSegs = segs.filter((_, idx) => idx !== deleteEdgeCandidate.idx);
+                      const pruned = pruneIsolatedNodes(nodes, nextSegs);
+                      setNodes(pruned.nodes);
+                      setSegs(pruned.segs);
+                      return;
+                    }
+                    if (addNodeMode) {
+                      const nextNodes = [...nodes, { id: nodes.length, x: world.x, y: world.y }];
+                      let nextSegs = [...segs];
+                      if (nodes.length) {
+                        let nearest = 0;
+                        let best = Infinity;
+                        nodes.forEach((n, idx) => {
+                          const d = Math.hypot(n.x - world.x, n.y - world.y);
+                          if (d < best) {
+                            best = d;
+                            nearest = idx;
+                          }
+                        });
+                        nextSegs.push([nextNodes.length - 1, nearest]);
+                      }
+                      setNodes(nextNodes);
+                      setSegs(nextSegs);
+                    }
+                  }}
+                  ref={stageRef}
+                >
+            <Layer>
+              {scene?.canvas ? (
+                <Rect
+                  x={0}
+                  y={0}
+                  width={scene.canvas.w}
+                  height={scene.canvas.h}
+                  stroke="#ffffff"
+                  strokeWidth={2 / mainViewScale}
+                  listening={false}
+                />
+              ) : null}
+            </Layer>
+              <Layer>{nodeLayer}</Layer>
+              <Layer>{borderLayer}</Layer>
+              {edgeCandidate ? (
+                <Layer>
+                  <Line
+                    points={[
+                      nodes[edgeCandidate.a].x,
+                      nodes[edgeCandidate.a].y,
+                      nodes[edgeCandidate.b].x,
+                      nodes[edgeCandidate.b].y,
+                    ]}
+                    stroke="#cfd6ff"
+                    opacity={0.4}
+                    strokeWidth={(1 / mainViewScale) * 2}
+                    strokeScaleEnabled={false}
+                  />
+                </Layer>
+              ) : null}
+              {deleteEdgeCandidate ? (
+                <Layer>
+                  <Line
+                    points={[
+                      nodes[deleteEdgeCandidate.a].x,
+                      nodes[deleteEdgeCandidate.a].y,
+                      nodes[deleteEdgeCandidate.b].x,
+                      nodes[deleteEdgeCandidate.b].y,
+                    ]}
+                    stroke="#ff3b30"
+                    opacity={0.6}
+                    strokeWidth={(1 / mainViewScale) * 2}
+                    strokeScaleEnabled={false}
+                  />
+                </Layer>
+              ) : null}
+              <Layer name="source-overlay">
+                {overlayItems.map((item) =>
+                  item.img ? (
+                    <Image
+                      key={item.id}
+                      image={item.img}
+                      x={item.x}
+                      y={item.y}
+                      width={item.width}
+                      height={item.height}
+                      offsetX={item.width / 2}
+                      offsetY={item.height / 2}
+                      scaleX={item.scaleX}
+                      scaleY={item.scaleY}
+                      rotation={item.rotation}
+                      draggable={!edgeMode && !deleteEdgeMode && !addNodeMode}
+                      onClick={() => setSelectedOverlayId(item.id)}
+                      onTap={() => setSelectedOverlayId(item.id)}
+                      onDragEnd={(e) => {
+                        const nx = e.target.x();
+                        const ny = e.target.y();
+                        const zid = findZoneAtPoint({ x: nx, y: ny });
+                        const next = overlayItems.map((o) =>
+                          o.id === item.id ? { ...o, x: nx, y: ny, zid } : o
+                        );
+                        setOverlayItems(next);
+                      }}
+                      onTransformEnd={() => {
+                        const node = overlayNodeRefs.current[item.id];
+                        if (!node) return;
+                        const scaleX = node.scaleX();
+                        const scaleY = node.scaleY();
+                        const rotation = node.rotation();
+                        const nx = node.x();
+                        const ny = node.y();
+                        node.scaleX(1);
+                        node.scaleY(1);
+                        const next = overlayItems.map((o) =>
+                          o.id === item.id
+                            ? {
+                                ...o,
+                                x: nx,
+                                y: ny,
+                                rotation,
+                                scaleX: o.scaleX * scaleX,
+                                scaleY: o.scaleY * scaleY,
+                              }
+                            : o
+                        );
+                        setOverlayItems(next);
+                      }}
+                      ref={(node) => {
+                        if (node) overlayNodeRefs.current[item.id] = node;
+                      }}
+                    />
+                  ) : null
+                )}
+                <Transformer
+                  ref={overlayTransformerRef}
+                  rotateEnabled
+                  enabledAnchors={[
+                    "top-left",
+                    "top-right",
+                    "bottom-left",
+                    "bottom-right",
+                  ]}
+                  boundBoxFunc={(oldBox, newBox) => {
+                    if (newBox.width < 10 || newBox.height < 10) return oldBox;
+                    return newBox;
+                  }}
+                />
+              </Layer>
+            <Layer>
+              {nodes.map((n) => (
+                  <Circle
+                    key={`n-${n.id}`}
+                    x={n.x}
+                    y={n.y}
+                    radius={3 / mainViewScale}
+                    fill="red"
+                    strokeScaleEnabled={false}
+                    draggable={!edgeMode && !deleteEdgeMode && !addNodeMode}
+                    onDragMove={(e) => {
+                    const next = nodes.map((p) =>
+                      p.id === n.id ? { ...p, x: e.target.x(), y: e.target.y() } : p
+                    );
+                    setNodes(next);
+                  }}
+                    onDragEnd={(e) => {
+                      const next = nodes.map((p) =>
+                        p.id === n.id ? { ...p, x: e.target.x(), y: e.target.y() } : p
+                      );
+                      const merged = mergeNodesIfClose(next, segs, n.id, snap);
+                      setNodes(merged.nodes);
+                      setSegs(merged.segs);
                     }}
                   />
-                </label>
+              ))}
+            </Layer>
+              </Stage>
+              {sceneLoading ? <div className="loading-overlay">Loading...</div> : null}
+              <div className="left-debug">
+                <div className="zone-count">
+                  Zones: {scene?.zone_id ? Math.max(...scene.zone_id) + 1 : 0}
+                </div>
+                <div className="zone-count">
+                  Debug:
+                  {scene?.debug
+                    ? ` raw=${scene.debug.polygons_raw || 0} kept=${scene.debug.polygons_final || 0} small=${scene.debug.polygons_removed_small || 0} largest=${scene.debug.polygons_removed_largest || 0} tri_keep=${scene.debug.tri_kept || 0} tri_small=${scene.debug.tri_removed_small || 0} tri_out=${scene.debug.tri_removed_outside || 0} packed=${scene.debug.packed_placed || 0}/${scene.debug.zones_total || 0}`
+                    : " n/a"}
+                </div>
+                <div className="zone-count">
+                  ZonePoly:
+                  {scene?.debug
+                    ? ` empty=${(scene.debug.zones_empty || []).length} hull=${(scene.debug.zones_convex_hull || []).length}`
+                    : " n/a"}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {leftTab === 'region' && (
+            <div className={`preview half ${sceneLoading ? "is-loading" : ""}`} ref={region2WrapRef}>
+              <div className="preview-header">
+                <div className="preview-title">Region (Konva)</div>
+                <div className="preview-controls">
+                  <button
+                    className="btn"
+                    onClick={() => {
+                      saveSvg(nodes, segs, overlayItems).then(async () => {
+                        await saveState();
+                        await loadScene(true, false, true);
+                      });
+                    }}
+                  >
+                    Save
+                  </button>
+                  <button
+                    className="icon-button"
+                    title="Download"
+                    onClick={() =>
+                      downloadStage(region2Ref, "region-konva.svg", scene?.canvas || null)
+                    }
+                  >
+                    {"\u2193"}
+                  </button>
+                </div>
+              </div>
+              {scene ? (
+                <Stage
+                  width={region2StageSize.w}
+                  height={region2StageSize.h}
+                  draggable
+                  scaleX={mainViewScale}
+                  scaleY={mainViewScale}
+                  x={mainViewPos.x}
+                  y={mainViewPos.y}
+                  onWheel={handleMainViewWheel}
+                  ref={region2Ref}
+                >
+                  <Layer>
+                    {scene?.canvas ? (
+                      <Rect
+                        x={0}
+                        y={0}
+                        width={scene.canvas.w}
+                        height={scene.canvas.h}
+                        stroke="#ffffff"
+                        strokeWidth={2 / mainViewScale}
+                        listening={false}
+                      />
+                    ) : null}
+                  </Layer>
+                  <Layer>
+                    {scene.regions.map((poly, idx) => (
+                      <Line
+                        key={`r2-${idx}`}
+                        points={toPoints(poly)}
+                        closed
+                        stroke="#f5f6ff"
+                        fill="#bbb"
+                        strokeWidth={1 / mainViewScale}
+                        strokeScaleEnabled={false}
+                      />
+                    ))}
+                  </Layer>
+                </Stage>
+              ) : null}
+              {sceneLoading ? <div className="loading-overlay">Loading...</div> : null}
+            </div>
+          )}
+
+          {leftTab === 'zone' && (
+            <div className={`preview half ${sceneLoading ? "is-loading" : ""}`} ref={zoneWrapRef}>
+              <div className="preview-header">
+              <div className="preview-title">Zone (Konva)</div>
+              <div className="preview-controls">
+                <button
+                  className="btn"
+                  onClick={() => loadScene(false, true, false)}
+                >
+                  Compute
+                </button>
                 <button
                   className="icon-button"
                   title="Download"
-                  onClick={() =>
-                    downloadStage(stageRef, "source-konva.svg", scene?.canvas || null)
-                }
-              >
-                {"\u2193"}
-              </button>
+                    onClick={() =>
+                      downloadStage(zoneRef, "zone-konva.svg", scene?.canvas || null)
+                    }
+                  >
+                    {"\u2193"}
+                  </button>
+                </div>
+              </div>
+              {zoneScene || scene ? (
+                <Stage
+                  width={zoneStageSize.w}
+                  height={zoneStageSize.h}
+                  draggable
+                  scaleX={mainViewScale}
+                  scaleY={mainViewScale}
+                  x={mainViewPos.x}
+                  y={mainViewPos.y}
+                  onWheel={handleMainViewWheel}
+                  ref={zoneRef}
+                >
+                  <Layer>
+              {zoneScene?.canvas || scene?.canvas ? (
+                  <Rect
+                    x={0}
+                    y={0}
+                    width={(zoneScene || scene).canvas.w}
+                    height={(zoneScene || scene).canvas.h}
+                    stroke="#ffffff"
+                    strokeWidth={2 / mainViewScale}
+                    listening={false}
+                  />
+                ) : null}
+              </Layer>
+              <Layer name="zone-image" visible={showImages}>
+                {(zoneScene || scene).region_colors
+                  ? (zoneScene || scene).regions.map((poly, idx) => (
+                      <Line
+                        key={`zf-${idx}`}
+                        points={toPoints(poly)}
+                        closed
+                        fill={(zoneScene || scene).region_colors[idx]}
+                        strokeScaleEnabled={false}
+                        onClick={() => handleZoneRegionClick(idx)}
+                        onTap={() => handleZoneRegionClick(idx)}
+                      />
+                    ))
+                  : null}
+              </Layer>
+              <Layer name="zone-overlay">
+                {overlayItems.map((item) =>
+                  item?.img ? (
+                    <Image
+                      key={`zo-${item.id}`}
+                      image={item.img}
+                          x={item.x}
+                          y={item.y}
+                          width={item.width}
+                          height={item.height}
+                          offsetX={item.width / 2}
+                          offsetY={item.height / 2}
+                          scaleX={item.scaleX}
+                          scaleY={item.scaleY}
+                          rotation={item.rotation}
+                          listening={false}
+                        />
+                      ) : null
+                    )}
+                  </Layer>
+                  <Layer name="zone-stroke">
+                    {Object.entries((zoneScene || scene).zone_boundaries || {}).flatMap(
+                      ([zid, paths]) =>
+                      paths.map((p, i) => (
+                        <Line
+                          key={`zb2-${zid}-${i}`}
+                          points={toPoints(p)}
+                          stroke={String(zid) === String(selectedZoneId) ? "#ff3b30" : "#f5f6ff"}
+                          strokeWidth={String(zid) === String(selectedZoneId) ? 3 : 1}
+                          strokeScaleEnabled={false}
+                        />
+                      ))
+                    )}
+                  </Layer>
+                  <Layer name="zone-label" visible={showLabels}>
+                    {Object.entries((zoneScene || scene).zone_labels || {}).map(([zid, lbl]) => {
+                      const selectedShuffle =
+                        (zoneScene || scene)?.zone_label_map?.[selectedZoneId] ??
+                        (zoneScene || scene)?.zone_label_map?.[parseInt(selectedZoneId, 10)];
+                      const targetLabel = selectedShuffle != null ? selectedShuffle : selectedZoneId;
+                      const isSelected = String(lbl.label) === String(targetLabel);
+                      const size = Math.max(labelFontSize / mainViewScale, 6 / mainViewScale);
+                      const metrics = measureText(lbl.label, size, labelFontFamily);
+                        return (
+                          <Text
+                            key={`zl-${zid}`}
+                            x={lbl.x}
+                            y={lbl.y}
+                            text={`${lbl.label}`}
+                            fill={isSelected ? "#ff3b30" : "#ffffff"}
+                            fontSize={size}
+                            fontFamily={labelFontFamily}
+                            align="center"
+                            verticalAlign="middle"
+                            offsetX={metrics.width / 2}
+                            offsetY={metrics.height / 2}
+                            listening
+                            hitStrokeWidth={10 / mainViewScale}
+                            onClick={() => {
+                              setSelectedZoneId(String(zid));
+                            }}
+                            onTap={() => {
+                              setSelectedZoneId(String(zid));
+                            }}
+                            onMouseDown={() => {
+                              setSelectedZoneId(String(zid));
+                            }}
+                            onTouchStart={() => {
+                              setSelectedZoneId(String(zid));
+                            }}
+                          />
+                        );
+                    })}
+                  </Layer>
+                </Stage>
+              ) : null}
+              {sceneLoading ? <div className="loading-overlay">Loading...</div> : null}
             </div>
-          </div>
-          <Stage
-            width={stageSize.w}
-            height={stageSize.h}
-            draggable
-            scaleX={scale}
-            scaleY={scale}
-            x={pos.x}
-            y={pos.y}
-            onWheel={handleWheel}
-            onMouseMove={() => {
-                const stage = stageRef.current;
-                const pointer = stage.getPointerPosition();
-                if (!pointer) return;
-                const world = {
-                  x: (pointer.x - pos.x) / scale,
-                  y: (pointer.y - pos.y) / scale,
-                };
-                if (edgeMode) {
-                  const cand = findEdgeCandidate(world);
-                  setEdgeCandidate(cand);
-                  setDeleteEdgeCandidate(null);
-                } else if (deleteEdgeMode) {
-                  const cand = findExistingEdgeCandidate(world);
-                  setDeleteEdgeCandidate(cand);
-                  setEdgeCandidate(null);
-                } else {
-                  setEdgeCandidate(null);
-                  setDeleteEdgeCandidate(null);
-                }
-              }}
-              onMouseLeave={() => {
-                if (edgeMode) setEdgeCandidate(null);
-                if (deleteEdgeMode) setDeleteEdgeCandidate(null);
-              }}
-              onMouseDown={() => {
-                const stage = stageRef.current;
-                const pointer = stage.getPointerPosition();
-                if (!pointer) return;
-                const world = {
-                  x: (pointer.x - pos.x) / scale,
-                  y: (pointer.y - pos.y) / scale,
-                };
-                if (edgeMode) {
-                  if (!edgeCandidate) return;
-                  const key = edgeKey(edgeCandidate.a, edgeCandidate.b);
-                  const segSet = new Set(segs.map(([a, b]) => edgeKey(a, b)));
-                  if (segSet.has(key)) return;
-                  const nextSegs = [...segs, [edgeCandidate.a, edgeCandidate.b]];
-                  setSegs(nextSegs);
-                  return;
-                }
-                if (deleteEdgeMode) {
-                  if (!deleteEdgeCandidate) return;
-                  const nextSegs = segs.filter((_, idx) => idx !== deleteEdgeCandidate.idx);
-                  const pruned = pruneIsolatedNodes(nodes, nextSegs);
-                  setNodes(pruned.nodes);
-                  setSegs(pruned.segs);
-                  return;
-                }
-                if (addNodeMode) {
-                  const nextNodes = [...nodes, { id: nodes.length, x: world.x, y: world.y }];
-                  let nextSegs = [...segs];
-                  if (nodes.length) {
-                    let nearest = 0;
-                    let best = Infinity;
-                    nodes.forEach((n, idx) => {
-                      const d = Math.hypot(n.x - world.x, n.y - world.y);
-                      if (d < best) {
-                        best = d;
-                        nearest = idx;
-                      }
-                    });
-                    nextSegs.push([nextNodes.length - 1, nearest]);
-                  }
-                  setNodes(nextNodes);
-                  setSegs(nextSegs);
-                }
-              }}
-              ref={stageRef}
-            >
-        <Layer>
-          {scene?.canvas ? (
-            <Rect
-              x={0}
-              y={0}
-              width={scene.canvas.w}
-              height={scene.canvas.h}
-              stroke="#ffffff"
-              strokeWidth={2 / scale}
-              listening={false}
-            />
-          ) : null}
-        </Layer>
-          <Layer>{nodeLayer}</Layer>
-          <Layer>{borderLayer}</Layer>
-          {edgeCandidate ? (
-            <Layer>
-              <Line
-                points={[
-                  nodes[edgeCandidate.a].x,
-                  nodes[edgeCandidate.a].y,
-                  nodes[edgeCandidate.b].x,
-                  nodes[edgeCandidate.b].y,
-                ]}
-                stroke="#cfd6ff"
-                opacity={0.4}
-                strokeWidth={(1 / scale) * 2}
-                strokeScaleEnabled={false}
-              />
-            </Layer>
-          ) : null}
-          {deleteEdgeCandidate ? (
-            <Layer>
-              <Line
-                points={[
-                  nodes[deleteEdgeCandidate.a].x,
-                  nodes[deleteEdgeCandidate.a].y,
-                  nodes[deleteEdgeCandidate.b].x,
-                  nodes[deleteEdgeCandidate.b].y,
-                ]}
-                stroke="#ff3b30"
-                opacity={0.6}
-                strokeWidth={(1 / scale) * 2}
-                strokeScaleEnabled={false}
-              />
-            </Layer>
-          ) : null}
-          <Layer name="source-overlay">
-            {overlayItems.map((item) =>
-              item.img ? (
-                <Image
-                  key={item.id}
-                  image={item.img}
-                  x={item.x}
-                  y={item.y}
-                  width={item.width}
-                  height={item.height}
-                  offsetX={item.width / 2}
-                  offsetY={item.height / 2}
-                  scaleX={item.scaleX}
-                  scaleY={item.scaleY}
-                  rotation={item.rotation}
-                  draggable={!edgeMode && !deleteEdgeMode && !addNodeMode}
-                  onClick={() => setSelectedOverlayId(item.id)}
-                  onTap={() => setSelectedOverlayId(item.id)}
-                  onDragEnd={(e) => {
-                    const nx = e.target.x();
-                    const ny = e.target.y();
-                    const zid = findZoneAtPoint({ x: nx, y: ny });
-                    const next = overlayItems.map((o) =>
-                      o.id === item.id ? { ...o, x: nx, y: ny, zid } : o
-                    );
-                    setOverlayItems(next);
-                  }}
-                  onTransformEnd={() => {
-                    const node = overlayNodeRefs.current[item.id];
-                    if (!node) return;
-                    const scaleX = node.scaleX();
-                    const scaleY = node.scaleY();
-                    const rotation = node.rotation();
-                    const nx = node.x();
-                    const ny = node.y();
-                    node.scaleX(1);
-                    node.scaleY(1);
-                    const next = overlayItems.map((o) =>
-                      o.id === item.id
-                        ? {
-                            ...o,
-                            x: nx,
-                            y: ny,
-                            rotation,
-                            scaleX: o.scaleX * scaleX,
-                            scaleY: o.scaleY * scaleY,
-                          }
-                        : o
-                    );
-                    setOverlayItems(next);
-                  }}
-                  ref={(node) => {
-                    if (node) overlayNodeRefs.current[item.id] = node;
-                  }}
-                />
-              ) : null
-            )}
-            <Transformer
-              ref={overlayTransformerRef}
-              rotateEnabled
-              enabledAnchors={[
-                "top-left",
-                "top-right",
-                "bottom-left",
-                "bottom-right",
-              ]}
-              boundBoxFunc={(oldBox, newBox) => {
-                if (newBox.width < 10 || newBox.height < 10) return oldBox;
-                return newBox;
-              }}
-            />
-          </Layer>
-        <Layer>
-          {nodes.map((n) => (
-              <Circle
-                key={`n-${n.id}`}
-                x={n.x}
-                y={n.y}
-                radius={3 / scale}
-                fill="red"
-                strokeScaleEnabled={false}
-                draggable={!edgeMode && !deleteEdgeMode && !addNodeMode}
-                onDragMove={(e) => {
-                const next = nodes.map((p) =>
-                  p.id === n.id ? { ...p, x: e.target.x(), y: e.target.y() } : p
-                );
-                setNodes(next);
-              }}
-                onDragEnd={(e) => {
-                  const next = nodes.map((p) =>
-                    p.id === n.id ? { ...p, x: e.target.x(), y: e.target.y() } : p
-                  );
-                  const merged = mergeNodesIfClose(next, segs, n.id, snap);
-                  setNodes(merged.nodes);
-                  setSegs(merged.segs);
-                }}
-              />
-          ))}
-        </Layer>
-          </Stage>
-          {sceneLoading ? <div className="loading-overlay">Loading...</div> : null}
-          <div className="left-debug">
-            <div className="zone-count">
-              Zones: {scene?.zone_id ? Math.max(...scene.zone_id) + 1 : 0}
-            </div>
-            <div className="zone-count">
-              Debug:
-              {scene?.debug
-                ? ` raw=${scene.debug.polygons_raw || 0} kept=${scene.debug.polygons_final || 0} small=${scene.debug.polygons_removed_small || 0} largest=${scene.debug.polygons_removed_largest || 0} tri_keep=${scene.debug.tri_kept || 0} tri_small=${scene.debug.tri_removed_small || 0} tri_out=${scene.debug.tri_removed_outside || 0} packed=${scene.debug.packed_placed || 0}/${scene.debug.zones_total || 0}`
-                : " n/a"}
-            </div>
-            <div className="zone-count">
-              ZonePoly:
-              {scene?.debug
-                ? ` empty=${(scene.debug.zones_empty || []).length} hull=${(scene.debug.zones_convex_hull || []).length}`
-                : " n/a"}
-            </div>
-          </div>
-        </div>
+          )}
         </div>
         <div className="right">
-          <div className={`preview tall region-stage ${sceneLoading ? "is-loading" : ""}`} ref={regionWrapRef}>
+          <div className={`preview region-stage ${sceneLoading ? "is-loading" : ""}`} ref={regionWrapRef} style={{ height: '100%'}}>
             <div className="preview-header">
               <div className="preview-title">Packed (Konva)</div>
               <div className="preview-controls">
@@ -3197,215 +3459,6 @@ export default function App() {
             {sceneLoading ? <div className="loading-overlay">Loading...</div> : null}
             {packedBleedError ? <div className="error">{packedBleedError}</div> : null}
             {packedBleedError2 ? <div className="error">{packedBleedError2}</div> : null}
-          </div>
-          <div className="preview-row">
-            <div className={`preview half ${sceneLoading ? "is-loading" : ""}`} ref={region2WrapRef}>
-              <div className="preview-header">
-                <div className="preview-title">Region (Konva)</div>
-                <div className="preview-controls">
-                  <button
-                    className="btn"
-                    onClick={() => {
-                      saveSvg(nodes, segs, overlayItems).then(async () => {
-                        await saveState();
-                        await loadScene(true, false, true);
-                      });
-                    }}
-                  >
-                    Save
-                  </button>
-                  <button
-                    className="icon-button"
-                    title="Download"
-                    onClick={() =>
-                      downloadStage(region2Ref, "region-konva.svg", scene?.canvas || null)
-                    }
-                  >
-                    {"\u2193"}
-                  </button>
-                </div>
-              </div>
-              {scene ? (
-                <Stage
-                  width={region2StageSize.w}
-                  height={region2StageSize.h}
-                  draggable
-                  scaleX={region2Scale}
-                  scaleY={region2Scale}
-                  x={region2Pos.x}
-                  y={region2Pos.y}
-                  onWheel={handleRegion2Wheel}
-                  ref={region2Ref}
-                >
-                  <Layer>
-                    {scene?.canvas ? (
-                      <Rect
-                        x={0}
-                        y={0}
-                        width={scene.canvas.w}
-                        height={scene.canvas.h}
-                        stroke="#ffffff"
-                        strokeWidth={2 / region2Scale}
-                        listening={false}
-                      />
-                    ) : null}
-                  </Layer>
-                  <Layer>
-                    {scene.regions.map((poly, idx) => (
-                      <Line
-                        key={`r2-${idx}`}
-                        points={toPoints(poly)}
-                        closed
-                        stroke="#f5f6ff"
-                        fill="#bbb"
-                        strokeWidth={1 / region2Scale}
-                        strokeScaleEnabled={false}
-                      />
-                    ))}
-                  </Layer>
-                </Stage>
-              ) : null}
-              {sceneLoading ? <div className="loading-overlay">Loading...</div> : null}
-            </div>
-            <div className={`preview half ${sceneLoading ? "is-loading" : ""}`} ref={zoneWrapRef}>
-              <div className="preview-header">
-              <div className="preview-title">Zone (Konva)</div>
-              <div className="preview-controls">
-                <button
-                  className="btn"
-                  onClick={() => loadScene(false, true, false)}
-                >
-                  Compute
-                </button>
-                <button
-                  className="icon-button"
-                  title="Download"
-                    onClick={() =>
-                      downloadStage(zoneRef, "zone-konva.svg", scene?.canvas || null)
-                    }
-                  >
-                    {"\u2193"}
-                  </button>
-                </div>
-              </div>
-              {zoneScene || scene ? (
-                <Stage
-                  width={zoneStageSize.w}
-                  height={zoneStageSize.h}
-                  draggable
-                  scaleX={zoneScale}
-                  scaleY={zoneScale}
-                  x={zonePos.x}
-                  y={zonePos.y}
-                  onWheel={handleZoneWheel}
-                  ref={zoneRef}
-                >
-                  <Layer>
-              {zoneScene?.canvas || scene?.canvas ? (
-                  <Rect
-                    x={0}
-                    y={0}
-                    width={(zoneScene || scene).canvas.w}
-                    height={(zoneScene || scene).canvas.h}
-                    stroke="#ffffff"
-                    strokeWidth={2 / zoneScale}
-                    listening={false}
-                  />
-                ) : null}
-              </Layer>
-              <Layer name="zone-image" visible={showImages}>
-                {(zoneScene || scene).region_colors
-                  ? (zoneScene || scene).regions.map((poly, idx) => (
-                      <Line
-                        key={`zf-${idx}`}
-                        points={toPoints(poly)}
-                        closed
-                        fill={(zoneScene || scene).region_colors[idx]}
-                        strokeScaleEnabled={false}
-                        onClick={() => handleZoneRegionClick(idx)}
-                        onTap={() => handleZoneRegionClick(idx)}
-                      />
-                    ))
-                  : null}
-              </Layer>
-              <Layer name="zone-overlay">
-                {overlayItems.map((item) =>
-                  item?.img ? (
-                    <Image
-                      key={`zo-${item.id}`}
-                      image={item.img}
-                          x={item.x}
-                          y={item.y}
-                          width={item.width}
-                          height={item.height}
-                          offsetX={item.width / 2}
-                          offsetY={item.height / 2}
-                          scaleX={item.scaleX}
-                          scaleY={item.scaleY}
-                          rotation={item.rotation}
-                          listening={false}
-                        />
-                      ) : null
-                    )}
-                  </Layer>
-                  <Layer name="zone-stroke">
-                    {Object.entries((zoneScene || scene).zone_boundaries || {}).flatMap(
-                      ([zid, paths]) =>
-                      paths.map((p, i) => (
-                        <Line
-                          key={`zb2-${zid}-${i}`}
-                          points={toPoints(p)}
-                          stroke={String(zid) === String(selectedZoneId) ? "#ff3b30" : "#f5f6ff"}
-                          strokeWidth={String(zid) === String(selectedZoneId) ? 3 : 1}
-                          strokeScaleEnabled={false}
-                        />
-                      ))
-                    )}
-                  </Layer>
-                  <Layer name="zone-label" visible={showLabels}>
-                    {Object.entries((zoneScene || scene).zone_labels || {}).map(([zid, lbl]) => {
-                      const selectedShuffle =
-                        (zoneScene || scene)?.zone_label_map?.[selectedZoneId] ??
-                        (zoneScene || scene)?.zone_label_map?.[parseInt(selectedZoneId, 10)];
-                      const targetLabel = selectedShuffle != null ? selectedShuffle : selectedZoneId;
-                      const isSelected = String(lbl.label) === String(targetLabel);
-                      const size = Math.max(labelFontSize / zoneScale, 6 / zoneScale);
-                      const metrics = measureText(lbl.label, size, labelFontFamily);
-                        return (
-                          <Text
-                            key={`zl-${zid}`}
-                            x={lbl.x}
-                            y={lbl.y}
-                            text={`${lbl.label}`}
-                            fill={isSelected ? "#ff3b30" : "#ffffff"}
-                            fontSize={size}
-                            fontFamily={labelFontFamily}
-                            align="center"
-                            verticalAlign="middle"
-                            offsetX={metrics.width / 2}
-                            offsetY={metrics.height / 2}
-                            listening
-                            hitStrokeWidth={10 / zoneScale}
-                            onClick={() => {
-                              setSelectedZoneId(String(zid));
-                            }}
-                            onTap={() => {
-                              setSelectedZoneId(String(zid));
-                            }}
-                            onMouseDown={() => {
-                              setSelectedZoneId(String(zid));
-                            }}
-                            onTouchStart={() => {
-                              setSelectedZoneId(String(zid));
-                            }}
-                          />
-                        );
-                    })}
-                  </Layer>
-                </Stage>
-              ) : null}
-              {sceneLoading ? <div className="loading-overlay">Loading...</div> : null}
-            </div>
           </div>
         </div>
       </div>
