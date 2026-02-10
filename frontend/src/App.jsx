@@ -1016,17 +1016,18 @@ export default function App() {
   };
 
   const simZoneIds = useMemo(() => {
-    const ids = Object.keys(scene?.zone_boundaries || {});
+    const source = zoneScene || scene;
+    const ids = Object.keys(source?.zone_boundaries || {});
     const getLabel = (zid) => {
       const lbl =
-        scene?.zone_label_map?.[zid] ??
-        scene?.zone_label_map?.[parseInt(zid, 10)] ??
+        source?.zone_label_map?.[zid] ??
+        source?.zone_label_map?.[parseInt(zid, 10)] ??
         zid;
       const num = Number(lbl);
       return Number.isFinite(num) ? num : Number(zid) || 0;
     };
     return ids.sort((a, b) => getLabel(a) - getLabel(b));
-  }, [scene]);
+  }, [zoneScene, scene]);
   const simZoneIndex = useMemo(() => {
     const map = {};
     simZoneIds.forEach((zid, idx) => {
@@ -1054,8 +1055,8 @@ export default function App() {
   const simActiveZid = simActiveIdx >= 0 ? simZoneIds[simActiveIdx] : null;
   const simActiveLabel =
     simActiveZid != null
-      ? scene?.zone_label_map?.[simActiveZid] ??
-        scene?.zone_label_map?.[parseInt(simActiveZid, 10)] ??
+      ? (zoneScene || scene)?.zone_label_map?.[simActiveZid] ??
+        (zoneScene || scene)?.zone_label_map?.[parseInt(simActiveZid, 10)] ??
         simActiveZid
       : "";
   const zoneLabelCenters = useMemo(() => {
@@ -1088,168 +1089,6 @@ export default function App() {
     const x = t / simMoveSeconds;
     return 1 - Math.pow(1 - x, 3);
   };
-
-  const simStage = scene?.canvas
-    ? (() => {
-        const gap = 20;
-        const totalW = (scene.canvas.w * 2) + gap;
-        const totalH = scene.canvas.h;
-        const fitScale = Math.min(simSize.w / totalW, simSize.h / totalH);
-        const offsetX = (simSize.w - totalW * fitScale) / 2;
-        const offsetY = (simSize.h - totalH * fitScale) / 2;
-        return (
-          <Stage
-            width={simSize.w}
-            height={simSize.h}
-            scaleX={fitScale}
-            scaleY={fitScale}
-            x={offsetX}
-            y={offsetY}
-          >
-            <Layer>
-              <Rect
-                x={0}
-                y={0}
-                width={scene.canvas.w}
-                height={scene.canvas.h}
-                stroke="#ffffff"
-                strokeWidth={1}
-              />
-              <Rect
-                x={scene.canvas.w + gap}
-                y={0}
-                width={scene.canvas.w}
-                height={scene.canvas.h}
-                stroke="#ffffff"
-                strokeWidth={1}
-              />
-            </Layer>
-            <Layer>
-              {scene.region_colors
-                ? scene.regions.map((poly, idx) => {
-                    const zid = scene.zone_id?.[idx];
-                    const zidKey = String(zid);
-                    const zoneIdx = simZoneIndex[zidKey] ?? 0;
-                    const local = simLocalFor(zoneIdx);
-                    if (local > 0) return null;
-                    const shift =
-                      scene.zone_shift?.[zid] || scene.zone_shift?.[parseInt(zid, 10)];
-                    if (!shift) return null;
-                    const rot = scene.zone_rot?.[zid] ?? scene.zone_rot?.[parseInt(zid, 10)] ?? 0;
-                    const center =
-                      scene.zone_center?.[zid] || scene.zone_center?.[parseInt(zid, 10)] || [0, 0];
-                    const tpts = transformPath(poly, shift, rot, center);
-                    return (
-                      <Line
-                        key={`sim-pack-fill-${idx}`}
-                        points={toPoints(tpts)}
-                        closed
-                        fill={scene.region_colors[idx]}
-                        strokeScaleEnabled={false}
-                      />
-                    );
-                  })
-                : null}
-              {packedLabels.map((lbl) => {
-                const zidKey = String(lbl.zid);
-                const zoneIdx = simZoneIndex[zidKey] ?? 0;
-                const local = simLocalFor(zoneIdx);
-                if (local > 0) return null;
-                const size = Math.max(labelFontSize * 0.5, 6);
-                const metrics = measureText(lbl.label, size, labelFontFamily);
-                return (
-                  <Text
-                    key={`sim-pack-label-${lbl.id}`}
-                    x={lbl.x}
-                    y={lbl.y}
-                    text={lbl.label}
-                    fill="#ffffff"
-                    fontSize={size}
-                    fontFamily={labelFontFamily}
-                    align="center"
-                    verticalAlign="middle"
-                    offsetX={metrics.width / 2}
-                    offsetY={metrics.height / 2}
-                  />
-                );
-              })}
-            </Layer>
-            <Layer>
-              {Object.values(scene.zone_labels || {}).map((lbl) => {
-                const size = Math.max(labelFontSize * 0.5, 6);
-                const metrics = measureText(lbl.label, size, labelFontFamily);
-                return (
-                  <Text
-                    key={`sim-zone-label-${lbl.label}`}
-                    x={lbl.x + scene.canvas.w + gap}
-                    y={lbl.y}
-                    text={lbl.label}
-                    fill="#ffffff"
-                    fontSize={size}
-                    fontFamily={labelFontFamily}
-                    align="center"
-                    verticalAlign="middle"
-                    offsetX={metrics.width / 2}
-                    offsetY={metrics.height / 2}
-                  />
-                );
-              })}
-            </Layer>
-            <Layer>
-              {simZoneIds.flatMap((zid) => {
-                const paths = scene.zone_boundaries?.[zid] || [];
-                return paths.map((p, i) => (
-                  <Line
-                    key={`sim-zone-${zid}-${i}`}
-                    points={toPoints(offsetPoints(p, scene.canvas.w + gap, 0))}
-                    stroke="#f5f6ff"
-                    strokeWidth={1}
-                    closed
-                  />
-                ));
-              })}
-            </Layer>
-            <Layer>
-              {scene.region_colors
-                ? scene.regions.map((poly, idx) => {
-                    const zid = scene.zone_id?.[idx];
-                    const zidKey = String(zid);
-                    const zoneIdx = simZoneIndex[zidKey] ?? 0;
-                    const local = simLocalFor(zoneIdx);
-                    const shift =
-                      scene.zone_shift?.[zid] || scene.zone_shift?.[parseInt(zid, 10)];
-                    if (!shift) return null;
-                    const rot = scene.zone_rot?.[zid] ?? scene.zone_rot?.[parseInt(zid, 10)] ?? 0;
-                    const center =
-                      scene.zone_center?.[zid] ||
-                      scene.zone_center?.[parseInt(zid, 10)] ||
-                      [0, 0];
-                    const src = transformPath(poly, shift, rot, center);
-                    const dst = offsetPoints(poly, scene.canvas.w + gap, 0);
-                    const pts =
-                      local >= 1
-                        ? dst
-                        : src.map((sp, k) => {
-                            const dp = dst[k] || sp;
-                            return [lerp(sp[0], dp[0], local), lerp(sp[1], dp[1], local)];
-                          });
-                    if (local <= 0) return null;
-                    return (
-                      <Line
-                        key={`sim-move-fill-${idx}`}
-                        points={toPoints(pts)}
-                        closed
-                        fill={scene.region_colors[idx]}
-                        strokeScaleEnabled={false}
-                      />
-                    );
-                  })
-                : null}
-            </Layer>
-          </Stage>
-        );
-      })()
-    : null;
 
   useEffect(() => {
     loadScene();
@@ -1823,16 +1662,23 @@ export default function App() {
       zid: item.zid ?? null,
     }));
 
-  const saveSvg = (nextNodes = nodes, nextSegs = segs, nextOverlays = overlayItems) =>
-    fetch("/api/save_svg", {
+  const saveSvg = async (nextNodes = nodes, nextSegs = segs, nextOverlays = overlayItems) => {
+    const res = await fetch("/api/save_svg", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         nodes: nextNodes,
         segs: nextSegs,
         overlays: serializeOverlays(nextOverlays),
+        source: sourceFilename || sourceName,
       }),
     });
+    if (!res.ok) {
+      const msg = await res.text().catch(() => "");
+      throw new Error(msg || `save failed: ${res.status}`);
+    }
+    return res.json().catch(() => ({}));
+  };
 
   const updateOverlayItem = (id, patch) => {
     setOverlayItems((items) =>
@@ -2476,6 +2322,177 @@ export default function App() {
     return out;
   }, [packedCellsByBin, packedSource]);
 
+  const simSource = zoneScene || scene;
+  const simPackedLabels = packedLabelSnappedAll || packedLabels || [];
+  const simStage = simSource?.canvas
+    ? (() => {
+        const gap = 20;
+        const totalW = (simSource.canvas.w * 2) + gap;
+        const totalH = simSource.canvas.h;
+        const fitScale = Math.min(simSize.w / totalW, simSize.h / totalH);
+        const offsetX = (simSize.w - totalW * fitScale) / 2;
+        const offsetY = (simSize.h - totalH * fitScale) / 2;
+        return (
+          <Stage
+            width={simSize.w}
+            height={simSize.h}
+            scaleX={fitScale}
+            scaleY={fitScale}
+            x={offsetX}
+            y={offsetY}
+          >
+            <Layer>
+              <Rect
+                x={0}
+                y={0}
+                width={simSource.canvas.w}
+                height={simSource.canvas.h}
+                stroke="#ffffff"
+                strokeWidth={1}
+              />
+              <Rect
+                x={simSource.canvas.w + gap}
+                y={0}
+                width={simSource.canvas.w}
+                height={simSource.canvas.h}
+                stroke="#ffffff"
+                strokeWidth={1}
+              />
+            </Layer>
+            <Layer>
+              {simSource.region_colors
+                ? simSource.regions.map((poly, idx) => {
+                    const zid = simSource.zone_id?.[idx];
+                    const zidKey = String(zid);
+                    const zoneIdx = simZoneIndex[zidKey] ?? 0;
+                    const local = simLocalFor(zoneIdx);
+                    if (local > 0) return null;
+                    const shift =
+                      simSource.zone_shift?.[zid] || simSource.zone_shift?.[parseInt(zid, 10)];
+                    if (!shift) return null;
+                    const rot =
+                      simSource.zone_rot?.[zid] ?? simSource.zone_rot?.[parseInt(zid, 10)] ?? 0;
+                    const center =
+                      simSource.zone_center?.[zid] ||
+                      simSource.zone_center?.[parseInt(zid, 10)] ||
+                      [0, 0];
+                    const tpts = transformPath(poly, shift, rot, center);
+                    return (
+                      <Line
+                        key={`sim-pack-fill-${idx}`}
+                        points={toPoints(tpts)}
+                        closed
+                        fill={simSource.region_colors[idx]}
+                        strokeScaleEnabled={false}
+                      />
+                    );
+                  })
+                : null}
+              {simPackedLabels.map((lbl) => {
+                const zidKey = String(lbl.zid);
+                const zoneIdx = simZoneIndex[zidKey] ?? 0;
+                const local = simLocalFor(zoneIdx);
+                if (local > 0) return null;
+                const size = Math.max(labelFontSize * 0.5, 6);
+                const metrics = measureText(lbl.label, size, labelFontFamily);
+                return (
+                  <Text
+                    key={`sim-pack-label-${lbl.id || lbl.zid}`}
+                    x={lbl.x}
+                    y={lbl.y}
+                    text={lbl.label}
+                    fill="#ffffff"
+                    fontSize={size}
+                    fontFamily={labelFontFamily}
+                    align="center"
+                    verticalAlign="middle"
+                    offsetX={metrics.width / 2}
+                    offsetY={metrics.height / 2}
+                  />
+                );
+              })}
+            </Layer>
+            <Layer>
+              {Object.entries(simSource.zone_labels || {}).map(([zid, lbl]) => {
+                const size = Math.max(labelFontSize * 0.5, 6);
+                const metrics = measureText(lbl.label, size, labelFontFamily);
+                const center = zoneLabelCenters?.[String(zid)];
+                const lx = Number.isFinite(center?.x) ? center.x : lbl.x;
+                const ly = Number.isFinite(center?.y) ? center.y : lbl.y;
+                return (
+                  <Text
+                    key={`sim-zone-label-${lbl.label}`}
+                    x={lx + simSource.canvas.w + gap}
+                    y={ly}
+                    text={lbl.label}
+                    fill="#ffffff"
+                    fontSize={size}
+                    fontFamily={labelFontFamily}
+                    align="center"
+                    verticalAlign="middle"
+                    offsetX={metrics.width / 2}
+                    offsetY={metrics.height / 2}
+                  />
+                );
+              })}
+            </Layer>
+            <Layer>
+              {simZoneIds.flatMap((zid) => {
+                const paths = simSource.zone_boundaries?.[zid] || [];
+                return paths.map((p, i) => (
+                  <Line
+                    key={`sim-zone-${zid}-${i}`}
+                    points={toPoints(offsetPoints(p, simSource.canvas.w + gap, 0))}
+                    stroke="#f5f6ff"
+                    strokeWidth={1}
+                    closed
+                  />
+                ));
+              })}
+            </Layer>
+            <Layer>
+              {simSource.region_colors
+                ? simSource.regions.map((poly, idx) => {
+                    const zid = simSource.zone_id?.[idx];
+                    const zidKey = String(zid);
+                    const zoneIdx = simZoneIndex[zidKey] ?? 0;
+                    const local = simLocalFor(zoneIdx);
+                    const shift =
+                      simSource.zone_shift?.[zid] || simSource.zone_shift?.[parseInt(zid, 10)];
+                    if (!shift) return null;
+                    const rot =
+                      simSource.zone_rot?.[zid] ?? simSource.zone_rot?.[parseInt(zid, 10)] ?? 0;
+                    const center =
+                      simSource.zone_center?.[zid] ||
+                      simSource.zone_center?.[parseInt(zid, 10)] ||
+                      [0, 0];
+                    const src = transformPath(poly, shift, rot, center);
+                    const dst = offsetPoints(poly, simSource.canvas.w + gap, 0);
+                    const pts =
+                      local >= 1
+                        ? dst
+                        : src.map((sp, k) => {
+                            const dp = dst[k] || sp;
+                            return [lerp(sp[0], dp[0], local), lerp(sp[1], dp[1], local)];
+                          });
+                    if (local <= 0) return null;
+                    return (
+                      <Line
+                        key={`sim-move-fill-${idx}`}
+                        points={toPoints(pts)}
+                        closed
+                        fill={simSource.region_colors[idx]}
+                        strokeScaleEnabled={false}
+                      />
+                    );
+                  })
+                : null}
+            </Layer>
+          </Stage>
+        );
+      })()
+    : null;
+
 
   const findRegionAtPoint = (regions, pt) => {
     if (!regions || !pt) return -1;
@@ -3062,48 +3079,6 @@ export default function App() {
     return parts.join("");
   };
 
-  const handleSimVideoDownload = async () => {
-    if (simVideoLoading || !scene) return;
-    setSimVideoLoading(true);
-    try {
-      const res = await fetch("/api/export_sim_video", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          scene,
-          packedLabels,
-          fontName: labelFontFamily,
-          fontSize: labelFontSize,
-        }),
-      });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || `export failed: ${res.status}`);
-      }
-      const data = await res.json().catch(() => ({}));
-      if (data?.name) {
-        const dl = await fetch(`/api/download_sim_video?name=${encodeURIComponent(data.name)}`);
-        if (!dl.ok) {
-          const msg = await dl.text().catch(() => "");
-          throw new Error(msg || `download failed: ${dl.status}`);
-        }
-        const blob = await dl.blob();
-        const url = URL.createObjectURL(blob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = data.name;
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        URL.revokeObjectURL(url);
-      }
-    } catch (err) {
-      setError(err.message || String(err));
-    } finally {
-      setSimVideoLoading(false);
-    }
-  };
-
   const handleSimPlayToggle = () => {
     if (!simPlaying && simProgress >= 1) {
       setSimProgress(0);
@@ -3421,13 +3396,47 @@ export default function App() {
             >
               <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
                 <path
-                  d="M10 3v9m0 0l-3-3m3 3l3-3M4 15h12"
+                  d="M6 3h5l3 3v11H6z"
                   stroke="currentColor"
                   strokeWidth="2"
                   fill="none"
-                  strokeLinecap="round"
                   strokeLinejoin="round"
                 />
+                <path d="M11 3v3h3" stroke="currentColor" strokeWidth="2" fill="none" />
+              </svg>
+            </button>
+            <button
+              className="icon-only"
+              onClick={async () => {
+                try {
+                  setSceneLoading(true);
+                  await saveSvg();
+                  await loadScene(true, true, true);
+                } catch (err) {
+                  setError(err.message || String(err));
+                } finally {
+                  setSceneLoading(false);
+                }
+              }}
+              title="Save"
+              aria-label="Save"
+            >
+              <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+                <path
+                  d="M4 3h10l2 2v12H4z"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  fill="none"
+                  strokeLinejoin="round"
+                />
+                <path
+                  d="M6 3v5h6V3"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  fill="none"
+                  strokeLinejoin="round"
+                />
+                <rect x="6" y="12" width="8" height="4" stroke="currentColor" strokeWidth="2" fill="none" />
               </svg>
             </button>
             <input
@@ -3461,13 +3470,13 @@ export default function App() {
             <button className="icon-only" onClick={exportPdf} title="Export PDF" aria-label="Export PDF">
               <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
                 <path
-                  d="M6 3h5l3 3v11H6z"
+                  d="M10 3v9m0 0l-3-3m3 3l3-3M4 15h12"
                   stroke="currentColor"
                   strokeWidth="2"
                   fill="none"
+                  strokeLinecap="round"
                   strokeLinejoin="round"
                 />
-                <path d="M11 3v3h3" stroke="currentColor" strokeWidth="2" fill="none" />
               </svg>
             </button>
             <button
@@ -4582,13 +4591,6 @@ export default function App() {
               />
               <button className="btn ghost" onClick={handleSimHtmlDownload}>
                 Download HTML
-              </button>
-              <button
-                className="btn"
-                onClick={handleSimVideoDownload}
-                disabled={simVideoLoading}
-              >
-                {simVideoLoading ? "Creating..." : "Download GIF"}
               </button>
             </div>
             <div className="sim-body" ref={simWrapRef}>

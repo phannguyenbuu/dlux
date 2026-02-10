@@ -67,10 +67,13 @@ app = Flask(__name__, static_folder=None)
 def _resolve_source_path(name: str) -> Path | None:
     if not name:
         return None
+    if os.path.isabs(name):
+        path = Path(name)
+        return path if path.exists() else None
     safe = os.path.basename(name)
     if not safe.lower().endswith(".svg"):
         safe = f"{safe}.svg"
-    candidates = [ROOT / safe, UPLOAD_DIR / safe]
+    candidates = [ROOT / safe, ROOT / "ref" / safe, UPLOAD_DIR / safe]
     for path in candidates:
         if path.exists():
             return path
@@ -1239,6 +1242,12 @@ def api_save_svg():
     nodes = payload.get("nodes", [])
     segs = payload.get("segs", [])
     overlays = payload.get("overlays", []) or []
+    src_name = str(payload.get("source") or payload.get("filename") or "").strip()
+    if src_name:
+        path = _resolve_source_path(src_name)
+        if not path:
+            return jsonify({"ok": False, "error": f"{src_name} not found"}), 404
+        _set_active_source(path)
     if not SVG_PATH.exists():
         return jsonify({"ok": False, "error": f"{SVG_PATH.name} not found"}), 404
 

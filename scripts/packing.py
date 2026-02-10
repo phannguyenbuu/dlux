@@ -795,9 +795,8 @@ def pack_regions(
                 )
         bin_offsets: Dict[int, Tuple[int, int]] = {}
         for bin_idx, (bx0, by0, bx1, by1) in bin_bounds.items():
-            off_x = 0
-            off_y = 0
-            bin_offsets[bin_idx] = (off_x - bx0, off_y - by0)
+            # Apply packing margins by shifting bin content inside the canvas.
+            bin_offsets[bin_idx] = (int(x_min) - bx0, int(y_min) - by0)
         placed_ids: List[int] = []
         for bin_idx, x, y, pw, ph, rid in rects:
             orig = bboxes[rid]
@@ -1724,12 +1723,12 @@ def compute_scene(svg_path, snap: float, render_packed_png: bool = False) -> Dic
     placements, order, rot_info = pack_regions(
         zone_pack_polys,
         canvas,
-        allow_rotate=True,
+        allow_rotate=False,
         angle_step=5.0,
         grid_step=config.PACK_GRID_STEP,
         fixed_angles=None,
         fixed_centers=zone_pack_centers,
-        max_bins=2,
+        max_bins=1,
         try_heuristics=True,
         two_pass=True,
         preferred_indices=None,
@@ -2139,11 +2138,11 @@ def main() -> None:
     placements, order, rot_info = pack_regions(
         zone_pack_polys,
         base_canvas,
-        allow_rotate=True,
+        allow_rotate=False,
         angle_step=5.0,
         fixed_angles=None,
         fixed_centers=zone_pack_centers,
-        max_bins=2,
+        max_bins=1,
         try_heuristics=True,
         two_pass=True,
         preferred_indices=None,

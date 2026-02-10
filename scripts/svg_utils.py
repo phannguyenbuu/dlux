@@ -131,11 +131,14 @@ def _normalize_name(name: str) -> str:
 def _find_embedded_image(root: ET.Element) -> Tuple[Path, np.ndarray, Tuple[float, float]]:
     href_key = "{http://www.w3.org/1999/xlink}href"
     svg_dir = config.SVG_PATH.parent
+    found_image = False
+    missing_path: Path | None = None
     for el in root.iter():
         tag = el.tag.rsplit("}", 1)[-1]
         if tag != "image":
             continue
-        href = el.attrib.get(href_key) or el.attrib.get("href")
+        found_image = True
+        href = el.attrib.get(href_key) or el.attrib.get("href") or el.attrib.get("xlink:href")
         if not href:
             continue
         href = unquote(href)
@@ -159,17 +162,9 @@ def _find_embedded_image(root: ET.Element) -> Tuple[Path, np.ndarray, Tuple[floa
         h = float(el.attrib.get("height", "0"))
         if img_path.exists():
             return img_path, m, (w, h)
-
-        basename = img_path.name
-        target = _normalize_name(basename)
-        candidates: List[Path] = []
-        for p in svg_dir.rglob("*"):
-            if p.suffix.lower() not in {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}:
-                continue
-            if _normalize_name(p.name) == target:
-                candidates.append(p)
-        if candidates:
-            return candidates[0], m, (w, h)
+        missing_path = img_path
+    if found_image and missing_path is not None:
+        raise RuntimeError(f"Embedded <image> not found on disk: {missing_path}")
     raise RuntimeError("No embedded <image> found in SVG")
 
 
