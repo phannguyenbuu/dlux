@@ -29,14 +29,116 @@ PACKED_ZONE_SCENE_SVG_PAGE2 = ROOT / "packed_zone_scene_page2.svg"
 SVG_PATH = ROOT / "convoi.svg"
 SVG_BACKUP = ROOT / "convoi_backup.svg"
 EXPORT_DIR = ROOT / "export"
+UPLOAD_DIR = ROOT / "uploads"
+CURRENT_SOURCE = SVG_PATH
+
+
+def _safe_source_name(name: str) -> str:
+    cleaned = "".join(ch if (ch.isalnum() or ch in ("-", "_")) else "_" for ch in name.strip())
+    return cleaned.strip("_") or "source"
+
+
+def _set_active_source(path: Path) -> None:
+    global CURRENT_SOURCE, SVG_PATH, SVG_BACKUP
+    global STATE_JSON, STATE_SVG, PACKED_LABELS_JSON, ZONE_LABELS_JSON, SCENE_JSON, SOURCE_ZONE_CLICK_JSON
+    global PACKED_ZONE_SCENE_SVG, PACKED_ZONE_SCENE_SVG_PAGE2
+    CURRENT_SOURCE = path
+    SVG_PATH = path
+    stem = _safe_source_name(path.stem)
+    SVG_BACKUP = path.with_name(f"{path.stem}_backup.svg")
+    STATE_JSON = ROOT / f"{stem}$ui_state.json"
+    STATE_SVG = ROOT / f"{stem}$ui_state.svg"
+    PACKED_LABELS_JSON = ROOT / f"{stem}$packed_labels.json"
+    ZONE_LABELS_JSON = ROOT / f"{stem}$zone_labels.json"
+    SCENE_JSON = ROOT / f"{stem}$scene_cache.json"
+    SOURCE_ZONE_CLICK_JSON = ROOT / f"{stem}$soure_zone_click.json"
+    PACKED_ZONE_SCENE_SVG = ROOT / f"{stem}$packed_zone_scene.svg"
+    PACKED_ZONE_SCENE_SVG_PAGE2 = ROOT / f"{stem}$packed_zone_scene_page2.svg"
+    config.SVG_PATH = path
+    new_toy.SVG_PATH = path
+    config.set_output_prefix(stem)
+
+
+_set_active_source(CURRENT_SOURCE)
 
 app = Flask(__name__, static_folder=None)
+
+
+def _resolve_source_path(name: str) -> Path | None:
+    if not name:
+        return None
+    safe = os.path.basename(name)
+    if not safe.lower().endswith(".svg"):
+        safe = f"{safe}.svg"
+    candidates = [ROOT / safe, UPLOAD_DIR / safe]
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
+@app.get("/api/source_svg")
+def api_source_svg():
+    if not SVG_PATH.exists():
+        return jsonify({"ok": False, "error": "source svg not found"}), 404
+    svg_text = SVG_PATH.read_text(encoding="utf-8")
+    return jsonify(
+        {
+            "ok": True,
+            "name": _safe_source_name(SVG_PATH.stem),
+            "filename": SVG_PATH.name,
+            "svg": svg_text,
+        }
+    )
+
+
+@app.post("/api/upload_svg")
+def api_upload_svg():
+    if "file" not in request.files:
+        return jsonify({"ok": False, "error": "missing file"}), 400
+    file = request.files["file"]
+    filename = os.path.basename(file.filename or "")
+    if not filename:
+        return jsonify({"ok": False, "error": "invalid filename"}), 400
+    if not filename.lower().endswith(".svg"):
+        return jsonify({"ok": False, "error": "only svg supported"}), 400
+    safe_stem = _safe_source_name(Path(filename).stem)
+    safe_name = f"{safe_stem}.svg"
+    UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = UPLOAD_DIR / safe_name
+    file.save(out_path)
+    _set_active_source(out_path)
+    return jsonify(
+        {
+            "ok": True,
+            "name": _safe_source_name(out_path.stem),
+            "filename": out_path.name,
+        }
+    )
+
+
+@app.post("/api/set_source")
+def api_set_source():
+    payload: Dict[str, Any] = request.get_json(silent=True) or {}
+    name = str(payload.get("name") or "").strip()
+    path = _resolve_source_path(name)
+    if not path:
+        return jsonify({"ok": False, "error": "source not found"}), 404
+    _set_active_source(path)
+    return jsonify(
+        {
+            "ok": True,
+            "name": _safe_source_name(path.stem),
+            "filename": path.name,
+        }
+    )
 
 
 def ensure_outputs() -> None:
     env = os.environ.copy()
     env["INTERSECT_SNAP"] = str(new_toy.INTERSECT_SNAP)
     env["LINE_EXTEND"] = str(new_toy.LINE_EXTEND)
+    env["SVG_PATH"] = str(SVG_PATH)
     cmd = [os.fspath(Path(os.environ.get("PYTHON", "python"))), os.fspath(ROOT / "new_toy.py")]
     subprocess.run(cmd, cwd=ROOT, env=env, check=False)
 
@@ -50,6 +152,7 @@ def api_scene():
         ("pack_margin_y", "PACK_MARGIN_Y"),
         ("pack_bleed", "PACK_BLEED"),
         ("draw_scale", "DRAW_SCALE"),
+        ("target_zones", "TARGET_ZONES"),
         ("pack_grid", "PACK_GRID_STEP"),
         ("pack_angle", "PACK_ANGLE_STEP"),
         ("pack_mode", "PACK_MODE"),
@@ -57,7 +160,7 @@ def api_scene():
         val = request.args.get(key)
         if val is not None:
             os.environ[env_key] = str(val)
-    data = new_toy.compute_scene(new_toy.SVG_PATH, snap, render_packed_png=False)
+    data = new_toy.compute_scene(config.SVG_PATH, snap, render_packed_png=False)
     SCENE_JSON.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     zone_labels = data.get("zone_labels")
     if isinstance(zone_labels, dict):
@@ -92,12 +195,14 @@ def api_render():
     env = os.environ.copy()
     env["INTERSECT_SNAP"] = str(snap)
     env["LINE_EXTEND"] = str(new_toy.LINE_EXTEND)
+    env["SVG_PATH"] = str(SVG_PATH)
     for key, env_key in (
         ("pack_padding", "PACK_PADDING"),
         ("pack_margin_x", "PACK_MARGIN_X"),
         ("pack_margin_y", "PACK_MARGIN_Y"),
         ("pack_bleed", "PACK_BLEED"),
         ("draw_scale", "DRAW_SCALE"),
+        ("target_zones", "TARGET_ZONES"),
         ("pack_grid", "PACK_GRID_STEP"),
         ("pack_angle", "PACK_ANGLE_STEP"),
         ("pack_mode", "PACK_MODE"),
@@ -219,6 +324,17 @@ def _color_to_bgr(val: Any) -> tuple[int, int, int]:
 @app.post("/api/pack_from_scene")
 def api_pack_from_scene():
     payload: Dict[str, Any] = request.get_json(silent=True) or {}
+    for key, env_key in (
+        ("pack_padding", "PACK_PADDING"),
+        ("pack_margin_x", "PACK_MARGIN_X"),
+        ("pack_margin_y", "PACK_MARGIN_Y"),
+        ("pack_grid", "PACK_GRID_STEP"),
+        ("pack_angle", "PACK_ANGLE_STEP"),
+        ("pack_mode", "PACK_MODE"),
+    ):
+        val = payload.get(key)
+        if val is not None:
+            os.environ[env_key] = str(val)
     canvas = payload.get("canvas") or {}
     w = int(canvas.get("w", 0) or 0)
     h = int(canvas.get("h", 0) or 0)
@@ -229,6 +345,19 @@ def api_pack_from_scene():
     if not regions or not zone_id:
         return jsonify({"ok": False, "error": "regions/zone_id missing"}), 400
     config._apply_pack_env()
+    # Ensure margins reflect payload even if env parsing is skipped elsewhere.
+    if payload.get("pack_margin_x") is not None:
+        config.PACK_MARGIN_X = int(float(payload.get("pack_margin_x", 0)))
+    if payload.get("pack_margin_y") is not None:
+        config.PACK_MARGIN_Y = int(float(payload.get("pack_margin_y", 0)))
+    print(
+        "[pack_from_scene] canvas="
+        f"{payload.get('canvas', {}).get('w', 0)}x{payload.get('canvas', {}).get('h', 0)} "
+        f"margin=({config.PACK_MARGIN_X},{config.PACK_MARGIN_Y}) "
+        f"padding={config.PADDING} bleed={config.PACK_BLEED} grid={config.PACK_GRID_STEP} "
+        f"angle={config.PACK_ANGLE_STEP} mode={config.PACK_MODE}",
+        flush=True,
+    )
     polys = []
     for poly in regions:
         pts = []
@@ -261,12 +390,12 @@ def api_pack_from_scene():
     placements, _order, rot_info = packing.pack_regions(
         zone_pack_polys,
         (w, h),
-        allow_rotate=True,
+        allow_rotate=False,
         angle_step=5.0,
         grid_step=config.PACK_GRID_STEP,
         fixed_angles=None,
         fixed_centers=zone_pack_centers,
-        max_bins=2,
+        max_bins=1,
         try_heuristics=True,
         two_pass=True,
         preferred_indices=None,
@@ -331,6 +460,18 @@ def api_pack_from_scene():
             "zone_rot": zone_rot,
             "zone_center": zone_center,
             "placement_bin": placement_bin_by_zid,
+            "zone_pack_polys": zone_pack_polys,
+            "zone_order": zone_order,
+            "debug_pack": {
+                "canvas": {"w": w, "h": h},
+                "margin_x": config.PACK_MARGIN_X,
+                "margin_y": config.PACK_MARGIN_Y,
+                "padding": config.PADDING,
+                "bleed": config.PACK_BLEED,
+                "grid": config.PACK_GRID_STEP,
+                "angle": config.PACK_ANGLE_STEP,
+                "mode": config.PACK_MODE,
+            },
         }
     )
 
@@ -746,7 +887,7 @@ def api_export_pdf():
         ), 500
 
     EXPORT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = EXPORT_DIR / f"{SVG_PATH.stem}_konva.pdf"
+    out_path = EXPORT_DIR / f"{_safe_source_name(SVG_PATH.stem)}_output.pdf"
     c = pdf_canvas.Canvas(str(out_path))
     tmp_paths: list[Path] = []
     try:
@@ -1099,7 +1240,7 @@ def api_save_svg():
     segs = payload.get("segs", [])
     overlays = payload.get("overlays", []) or []
     if not SVG_PATH.exists():
-        return jsonify({"ok": False, "error": "convoi.svg not found"}), 404
+        return jsonify({"ok": False, "error": f"{SVG_PATH.name} not found"}), 404
 
     if not SVG_BACKUP.exists():
         SVG_BACKUP.write_bytes(SVG_PATH.read_bytes())

@@ -1,4 +1,6 @@
 import React, { useMemo, useRef, useState, useEffect } from "react";
+import { jsPDF } from "jspdf";
+import { svg2pdf } from "svg2pdf.js";
 import Konva from "konva";
 import { Stage, Layer, Line, Text, Circle, Rect, Path, Group, Image, Transformer } from "react-konva";
 
@@ -105,6 +107,21 @@ const buildPackedPolyData = (data) => {
   });
 };
 
+const buildPackedZonePolyData = (data) => {
+  if (!data?.zone_pack_polys || !data?.zone_order) return [];
+  const out = [];
+  data.zone_order.forEach((zid, idx) => {
+    const poly = data.zone_pack_polys?.[idx];
+    if (!poly || !poly.length) return;
+    const shift = data.zone_shift?.[zid] || data.zone_shift?.[parseInt(zid, 10)];
+    const rot = data.zone_rot?.[zid] ?? data.zone_rot?.[parseInt(zid, 10)] ?? 0;
+    const center = data.zone_center?.[zid] || data.zone_center?.[parseInt(zid, 10)] || [0, 0];
+    const tpts = shift ? transformPath(poly, shift, rot, center) : poly;
+    out.push({ pts: tpts, bbox: bboxFromPts(tpts) });
+  });
+  return out;
+};
+
 const buildPackedEmptyCells = (data, packedPolyData) => {
   if (!data?.canvas || !packedPolyData?.length) return [];
   const cellSize = 6;
@@ -197,9 +214,7 @@ const scaleSceneData = (scene, ratio) => {
 
   return {
     ...scene,
-    canvas: scene.canvas
-      ? { ...scene.canvas, w: scaleNum(scene.canvas.w), h: scaleNum(scene.canvas.h) }
-      : scene.canvas,
+    canvas: scene.canvas ? { ...scene.canvas } : scene.canvas,
     regions: scalePolyList(scene.regions),
     zone_boundaries: scaleLineDict(scene.zone_boundaries),
     zone_labels: scaleLabelDict(scene.zone_labels),
@@ -845,6 +860,10 @@ const polyAreaAndCentroid = (poly) => {
 export default function App() {
   const [snap, setSnap] = useState(1);
   const [sourceScale, setSourceScale] = useState(1);
+  const [targetZones, setTargetZones] = useState(120);
+  const [sourceName, setSourceName] = useState("convoi");
+  const [sourceFilename, setSourceFilename] = useState("convoi.svg");
+  const [recentFiles, setRecentFiles] = useState([]);
   const [scene, setScene] = useState(null);
   const [zoneScene, setZoneScene] = useState(null);
   const [error, setError] = useState("");
@@ -874,6 +893,7 @@ export default function App() {
   const overlayTransformerRef = useRef(null);
   const overlayNodeRefs = useRef({});
   const regionNeighborCursorRef = useRef({});
+  const sourceFileInputRef = useRef(null);
   const [mainViewScale, setMainViewScale] = useState(1);
   const [mainViewPos, setMainViewPos] = useState({ x: 0, y: 0 });
   const [scale, setScale] = useState(1);
@@ -923,9 +943,9 @@ export default function App() {
   const [edgeCandidate, setEdgeCandidate] = useState(null);
   const [deleteEdgeCandidate, setDeleteEdgeCandidate] = useState(null);
   const [sceneLoading, setSceneLoading] = useState(true);
-  const [packPadding, setPackPadding] = useState(4);
-  const [packMarginX, setPackMarginX] = useState(30);
-  const [packMarginY, setPackMarginY] = useState(30);
+  const [packedLoading, setPackedLoading] = useState(false);
+  const [packPadding, setPackPadding] = useState(0);
+  const [packMargin, setPackMargin] = useState(0);
   const [packBleed, setPackBleed] = useState(10);
   const [drawScale, setDrawScale] = useState(0.5);
   const [packGrid, setPackGrid] = useState(5);
@@ -943,6 +963,7 @@ export default function App() {
     const prev = sourceScale || 1;
     if (Math.abs(next - prev) < 1e-6) return;
     const ratio = next / prev;
+    setAutoFit(false);
     setSourceScale(next);
 
     setSvgSize((s) => ({ w: s.w * ratio, h: s.h * ratio }));
@@ -987,9 +1008,10 @@ export default function App() {
 
     const packedSource = nextZoneScene || nextScene;
     if (packedSource) {
-      const packedPolyData = buildPackedPolyData(packedSource);
+      const packedPolyData = packedSource.zone_pack_polys
+        ? buildPackedZonePolyData(packedSource)
+        : buildPackedPolyData(packedSource);
       setPackedEmptyCells(buildPackedEmptyCells(packedSource, packedPolyData));
-      refreshPackedFromZoneScene(packedSource);
     }
   };
 
@@ -1072,7 +1094,7 @@ export default function App() {
         const gap = 20;
         const totalW = (scene.canvas.w * 2) + gap;
         const totalH = scene.canvas.h;
-        const fitScale = Math.min(simSize.w / totalW, simSize.h / totalH) * 1.06;
+        const fitScale = Math.min(simSize.w / totalW, simSize.h / totalH);
         const offsetX = (simSize.w - totalW * fitScale) / 2;
         const offsetY = (simSize.h - totalH * fitScale) / 2;
         return (
@@ -1307,6 +1329,16 @@ export default function App() {
     return () => window.removeEventListener("resize", updateSimSize);
   }, []);
 
+  useEffect(() => {
+    if (!showSim) return;
+    const raf = requestAnimationFrame(() => {
+      if (!simWrapRef.current) return;
+      const rect = simWrapRef.current.getBoundingClientRect();
+      setSimSize({ w: Math.max(300, rect.width), h: Math.max(200, rect.height) });
+    });
+    return () => cancelAnimationFrame(raf);
+  }, [showSim]);
+
   const fitMainViewToView = (bounds) => {
     let viewW, viewH;
     if (leftTab === "source") {
@@ -1430,7 +1462,36 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKey);
   }, [selectedOverlayId, nodes, segs, overlayItems]);
 
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem("recentSvgFiles");
+      if (!stored) return;
+      const parsed = JSON.parse(stored);
+      if (Array.isArray(parsed)) {
+        setRecentFiles(parsed.filter((item) => item && item.filename));
+      }
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
+  const pushRecentFile = (entry) => {
+    if (!entry || !entry.filename) return;
+    setRecentFiles((prev) => {
+      const next = [entry, ...(prev || []).filter((item) => item?.filename !== entry.filename)];
+      const trimmed = next.slice(0, 12);
+      try {
+        localStorage.setItem("recentSvgFiles", JSON.stringify(trimmed));
+      } catch {
+        // ignore storage errors
+      }
+      return trimmed;
+    });
+  };
+
   const loadScene = async (fit = true, updatePacked = true, updateZone = true) => {
+    let loadedScene = null;
+    let loadedZoneScene = null;
     try {
       setError("");
       setAutoFit(fit);
@@ -1445,9 +1506,16 @@ export default function App() {
       } catch {
         savedView = null;
       }
-      const svgRes = await fetch("/out/convoi.svg");
+      const svgRes = await fetch("/api/source_svg");
       if (!svgRes.ok) throw new Error(`svg fetch failed: ${svgRes.status}`);
-      const svgText = await svgRes.text();
+      const svgJson = await svgRes.json();
+      if (!svgJson?.svg) throw new Error("svg fetch failed: empty response");
+      const svgText = svgJson.svg;
+      if (svgJson.name) setSourceName(svgJson.name);
+      if (svgJson.filename) setSourceFilename(svgJson.filename);
+      if (svgJson.name || svgJson.filename) {
+        pushRecentFile({ name: svgJson.name || "", filename: svgJson.filename || "" });
+      }
       const scaleRatio = sourceScale || 1;
       const parsedSize = parseSvgSize(svgText);
       const scaledSize =
@@ -1513,7 +1581,7 @@ export default function App() {
       setSegs(snapped.segs);
 
       const res = await fetch(
-        `/api/scene?snap=${snap}&pack_padding=${packPadding}&pack_margin_x=${packMarginX}&pack_margin_y=${packMarginY}&draw_scale=${drawScale}&pack_grid=${packGrid}&pack_angle=${packAngle}&pack_mode=${packMode}`
+        `/api/scene?snap=${snap}&pack_padding=${packPadding}&pack_margin_x=${packMargin}&pack_margin_y=${packMargin}&draw_scale=${drawScale}&target_zones=${targetZones}&pack_grid=${packGrid}&pack_angle=${packAngle}&pack_mode=${packMode}`
       );
       if (!res.ok) {
         throw new Error(`scene fetch failed: ${res.status}`);
@@ -1521,6 +1589,7 @@ export default function App() {
       const data = await res.json();
       const scaledData = scaleRatio === 1 ? data : scaleSceneData(data, scaleRatio);
       setScene(scaledData);
+      loadedScene = scaledData;
       if (updateZone) {
         let zoneData = scaledData;
         try {
@@ -1541,7 +1610,7 @@ export default function App() {
           zoneClickCacheRef.current = [];
         }
         setZoneScene(zoneData);
-        await refreshPackedFromZoneScene(zoneData);
+        loadedZoneScene = zoneData;
       }
       logPackedPreview(scaledData);
       if (typeof scaledData.draw_scale === "number") {
@@ -1557,7 +1626,9 @@ export default function App() {
         if (updatePacked) {
           setPackedImageSrc(`/out/packed.svg?t=${Date.now()}`);
           setPackedImageSrc2(`/out/packed_page2.svg?t=${Date.now()}`);
-          const packedPolyData = buildPackedPolyData(scaledData);
+          const packedPolyData = scaledData.zone_pack_polys
+            ? buildPackedZonePolyData(scaledData)
+            : buildPackedPolyData(scaledData);
           const emptyCells = buildPackedEmptyCells(scaledData, packedPolyData);
           setPackedEmptyCells(emptyCells);
           let cachedPacked = {};
@@ -1672,9 +1743,69 @@ export default function App() {
         fitZoneToView(zoneBounds);
       }
       setSceneLoading(false);
+      return { scene: loadedScene, zoneScene: loadedZoneScene };
     } catch (err) {
       setError(err.message || String(err));
       setSceneLoading(false);
+      return null;
+    }
+  };
+
+  const handleLoadClick = () => {
+    if (sourceFileInputRef.current) {
+      sourceFileInputRef.current.value = "";
+      sourceFileInputRef.current.click();
+    }
+  };
+
+  const handleFileUpload = async (file) => {
+    if (!file) return;
+    try {
+      setError("");
+      const form = new FormData();
+      form.append("file", file);
+      const res = await fetch("/api/upload_svg", {
+        method: "POST",
+        body: form,
+      });
+      if (!res.ok) {
+        const msg = await res.text();
+        throw new Error(msg || `upload failed: ${res.status}`);
+      }
+      const data = await res.json();
+      if (data?.name) setSourceName(data.name);
+      if (data?.filename) setSourceFilename(data.filename);
+      if (data?.name || data?.filename) {
+        pushRecentFile({ name: data.name || "", filename: data.filename || file.name });
+      }
+      await loadScene(true, true, true);
+    } catch (err) {
+      setError(err.message || String(err));
+    }
+  };
+
+  const handleRecentSelect = async (filename) => {
+    if (!filename) return;
+    try {
+      setError("");
+      const res = await fetch("/api/set_source", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name: filename }),
+      });
+      if (!res.ok) {
+        const msg = await res.text();
+        throw new Error(msg || `set source failed: ${res.status}`);
+      }
+      const data = await res.json();
+      if (data?.name) setSourceName(data.name);
+      if (data?.filename) setSourceFilename(data.filename);
+      if (data?.name || data?.filename) {
+        pushRecentFile({ name: data.name || "", filename: data.filename || filename });
+      }
+      await loadScene(true, true, true);
+    } catch (err) {
+      setError(err.message || String(err));
     }
   };
 
@@ -1781,13 +1912,12 @@ export default function App() {
     <title>Simulate</title>
     <style>
       html, body { margin: 0; padding: 0; background: #0b1022; color: #e8ebff; font-family: Arial, sans-serif; }
-      .wrap { width: 100vw; height: 100vh; display: flex; flex-direction: column; }
-      .topbar { height: 48px; display: flex; align-items: center; justify-content: center; position: relative; }
-      .topbar .close { position: absolute; right: 16px; top: 10px; width: 28px; height: 28px; border: 1px solid rgba(232,235,255,0.3); background: rgba(17,21,46,0.6); color: #e8ebff; border-radius: 6px; }
-      .stage-wrap { flex: 1; position: relative; }
-      .controls { height: 56px; display: flex; align-items: center; gap: 12px; padding: 0 16px; }
+      .wrap { width: 100vw; height: 100vh; position: relative; }
+      .topbar { height: 48px; display: flex; align-items: center; justify-content: center; position: relative; z-index: 3; }
+      .stage-wrap { position: absolute; top: 48px; left: 0; right: 0; bottom: 0; z-index: 1; }
+      .controls { height: 42px; display: flex; align-items: center; justify-content: center; gap: 12px; padding: 4px 16px; position: absolute; left: 0; right: 0; bottom: 30px; z-index: 5; background: rgba(10, 14, 28, 0.8); backdrop-filter: blur(6px); border-top: 1px solid rgba(255, 255, 255, 0.06); }
       .controls .icon { width: 28px; height: 28px; border-radius: 6px; border: 1px solid rgba(232,235,255,0.3); background: rgba(17,21,46,0.6); color: #e8ebff; }
-      .controls input[type=range] { flex: 1; }
+      .controls input[type=range] { width: 60%; max-width: 60%; }
     </style>
     <script src="https://unpkg.com/konva@9/konva.min.js"></script>
   </head>
@@ -1795,13 +1925,13 @@ export default function App() {
     <div class="wrap">
       <div class="topbar">
         <div id="movingText">Moving index: -</div>
-        <button class="close" title="Close">x</button>
+
       </div>
-      <div class="stage-wrap" id="stageWrap"></div>
       <div class="controls">
         <button class="icon" id="playBtn">▶</button>
         <input type="range" id="slider" min="0" max="1" step="0.001" value="0" />
       </div>
+      <div class="stage-wrap" id="stageWrap"></div>
     </div>
     <script>
       const data = ${JSON.stringify(payload)};
@@ -1973,7 +2103,7 @@ export default function App() {
         const rect = wrap.getBoundingClientRect();
         const totalW = (data.canvas.w * 2) + gap;
         const totalH = data.canvas.h;
-        const fitScale = Math.min(rect.width / totalW, rect.height / totalH) * 1.06;
+        const fitScale = Math.min(rect.width / totalW, rect.height / totalH);
         const offsetX = (rect.width - totalW * fitScale) / 2;
         const offsetY = (rect.height - totalH * fitScale) / 2;
         stage.width(rect.width);
@@ -2222,62 +2352,60 @@ export default function App() {
     return String(zid);
   };
 
+  const packedSource = zoneScene || scene;
+
   const packedBoxData = useMemo(() => {
-    if (!scene?.zone_pack_polys || !scene?.zone_order || !scene?.placements) return [];
+    if (!packedSource?.zone_shift) return [];
     const out = [];
-    const zoneOrder = scene.zone_order || [];
+    const zoneOrder =
+      packedSource.zone_order ||
+      (packedSource.zone_pack_polys ? packedSource.zone_pack_polys.map((_, i) => i) : []);
+    const polys = packedSource.zone_pack_polys || [];
     zoneOrder.forEach((zid, idx) => {
-      const poly = scene.zone_pack_polys?.[idx];
-      const placement = scene.placements?.[idx];
-      if (!poly || !poly.length || !placement) return;
-      const dx = placement?.[0] ?? -1;
-      const dy = placement?.[1] ?? -1;
-      const bw = placement?.[2] ?? 0;
-      const bh = placement?.[3] ?? 0;
-      if (bw <= 0 || bh <= 0) return;
-      const info = scene.rot_info?.[idx] || {};
-      const ang = info?.angle ?? 0;
-      const cx = info?.cx ?? 0;
-      const cy = info?.cy ?? 0;
-      const rpts = poly.map((p) => rotatePt(p, ang, cx, cy));
-      const bb = bboxFromPts(rpts);
+      const poly = polys?.[idx];
+      if (!poly || !poly.length) return;
+      const shift =
+        packedSource.zone_shift?.[zid] ||
+        packedSource.zone_shift?.[parseInt(zid, 10)];
+      if (!shift) return;
+      const rot =
+        packedSource.zone_rot?.[zid] ??
+        packedSource.zone_rot?.[parseInt(zid, 10)] ??
+        0;
+      const center =
+        packedSource.zone_center?.[zid] ||
+        packedSource.zone_center?.[parseInt(zid, 10)] ||
+        [0, 0];
+      const tpts = transformPath(poly, shift, rot, center);
+      const bb = bboxFromPts(tpts);
       if (!bb) return;
-      const x = dx + bb.minx;
-      const y = dy + bb.miny;
-      const bin = scene?.placement_bin?.[zid] ?? scene?.placement_bin?.[parseInt(zid, 10)];
-      const page = bin === 1 ? 1 : 0;
-      const xOffset = page === 1 ? (scene?.canvas?.w || 0) + 40 : 0;
+      const xOffset = 0;
       out.push({
         zid: String(zid),
-        label: getZoneAlias(zid, scene),
-        minx: x,
-        miny: y,
-        maxx: x + bw,
-        maxy: y + bh,
+        label: getZoneAlias(zid, packedSource),
+        minx: bb.minx,
+        miny: bb.miny,
+        maxx: bb.maxx,
+        maxy: bb.maxy,
         xOffset,
       });
     });
     return out;
-  }, [scene]);
-
-  const packedSource = zoneScene || scene;
+  }, [packedSource]);
 
   const packedEmptyCellsDerived = useMemo(() => {
     if (!packedSource) return [];
-    const packedPolyData = buildPackedPolyData(packedSource);
+    const packedPolyData = packedSource.zone_pack_polys
+      ? buildPackedZonePolyData(packedSource)
+      : buildPackedPolyData(packedSource);
     return buildPackedEmptyCells(packedSource, packedPolyData);
   }, [packedSource]);
 
   
 
   const packedCellsByBin = useMemo(() => {
-    if (!packedEmptyCellsDerived.length || !packedSource?.canvas) {
-      return { 0: packedEmptyCellsDerived, 1: [] };
-    }
-    const offset = (packedSource.canvas.w || 0) + 40;
-    const cells1 = packedEmptyCellsDerived.map((c) => [c[0] + offset, c[1]]);
-    return { 0: packedEmptyCellsDerived, 1: cells1 };
-  }, [packedEmptyCellsDerived, packedSource]);
+    return { 0: packedEmptyCellsDerived, 1: [] };
+  }, [packedEmptyCellsDerived]);
 
   const packedLabelSnappedAll = useMemo(() => {
     if (!packedSource?.zone_boundaries) return [];
@@ -2319,7 +2447,7 @@ export default function App() {
         packedSource?.placement_bin?.[zid] ??
         packedSource?.placement_bin?.[parseInt(zid, 10)];
       const page = bin === 1 ? 1 : 0;
-      const pageOffset = page === 1 ? (packedSource?.canvas?.w || 0) + 40 : 0;
+      const pageOffset = 0;
       const anchorX = best.cx + pageOffset;
       const anchorY = best.cy;
       const cells = packedCellsByBin[page] || [];
@@ -2374,6 +2502,12 @@ export default function App() {
           regions: source.regions,
           zone_id: source.zone_id,
           region_colors: source.region_colors || [],
+          pack_padding: packPadding,
+          pack_margin_x: packMargin,
+          pack_margin_y: packMargin,
+          pack_grid: packGrid,
+          pack_angle: packAngle,
+          pack_mode: packMode,
         }),
       });
       if (!res.ok) {
@@ -2401,6 +2535,8 @@ export default function App() {
                 zone_rot: data.zone_rot || prev.zone_rot,
                 zone_center: data.zone_center || prev.zone_center,
                 placement_bin: data.placement_bin || prev.placement_bin,
+                zone_pack_polys: data.zone_pack_polys || prev.zone_pack_polys,
+                zone_order: data.zone_order || prev.zone_order,
               }
             : prev
         );
@@ -2552,7 +2688,36 @@ export default function App() {
     console.log(`[zone] region=${rid} attach=${targetAlias}`);
     setZoneScene(res.source);
     setSelectedZoneId(String(res.targetZid));
-    refreshPackedFromZoneScene(res.source);
+  };
+
+  const panMainViewToPoint = (pt) => {
+    if (!pt) return;
+    const viewW = stageSize.w || 0;
+    const viewH = stageSize.h || 0;
+    const scale = mainViewScale || 1;
+    if (viewW <= 0 || viewH <= 0) return;
+    setMainViewPos({
+      x: viewW / 2 - pt.x * scale,
+      y: viewH / 2 - pt.y * scale,
+    });
+  };
+
+  const handlePackedZoneClick = (zid) => {
+    const key = String(zid);
+    setSelectedZoneId(key);
+    const center = zoneLabelCenters?.[key];
+    if (center && Number.isFinite(center.x) && Number.isFinite(center.y)) {
+      panMainViewToPoint(center);
+      return;
+    }
+    const source = zoneScene || scene;
+    if (!source) return;
+    const lbl =
+      source.zone_labels?.[key] ??
+      source.zone_labels?.[parseInt(key, 10)];
+    if (lbl && Number.isFinite(lbl.x) && Number.isFinite(lbl.y)) {
+      panMainViewToPoint({ x: lbl.x, y: lbl.y });
+    }
   };
 
   const transformOverlayToPacked = (item) => {
@@ -2601,10 +2766,16 @@ export default function App() {
         throw new Error("canvas missing");
       }
       setExportPdfLoading(true);
+      await new Promise((r) => requestAnimationFrame(r));
       setExportPdfInfo(null);
       const size = { w: scene.canvas.w, h: scene.canvas.h };
+      const targetMm = { w: 260, h: 190 };
+      const fontSizeMm = 2.0;
+      const fontSizePx = size.w > 0 ? (size.w / targetMm.w) * fontSizeMm : labelFontSize;
+      const prevSelected = selectedZoneId;
+      setSelectedZoneId(null);
       const zoneLabelsSvg = (svgText) =>
-        injectSvgLabels(svgText, scene.zone_labels, labelFontFamily, labelFontSize);
+        injectSvgLabels(svgText, scene.zone_labels, labelFontFamily, labelFontSize, zoneLabelCenters);
       const pages = [
           {
             name: "zone_image",
@@ -2617,6 +2788,7 @@ export default function App() {
                 "zone-hit": false,
               })
             ),
+            opts: { darkenExistingStroke: true, removeFill: false },
           },
           {
             name: "zone_noimage",
@@ -2629,6 +2801,7 @@ export default function App() {
                 "zone-hit": false,
               })
             ),
+            opts: { forceStroke: true, removeFill: true },
           },
           {
             name: "packed_image_nostroke",
@@ -2639,6 +2812,7 @@ export default function App() {
               "packed-label": true,
               "packed-hit": false,
             }),
+            opts: { forceStroke: false, removeFill: false },
           },
           {
             name: "packed_noimage_stroke_nolabel",
@@ -2649,50 +2823,54 @@ export default function App() {
               "packed-label": false,
               "packed-hit": false,
             }),
+            opts: { forceStroke: true, removeFill: true },
           },
       ];
-      const res = await fetch("/api/export_pdf", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          pages,
-          fontName: labelFontFamily,
-          fontSize: labelFontSize,
-        }),
+      const orientation = "l";
+      const pdf = new jsPDF({
+        unit: "mm",
+        format: [targetMm.w, targetMm.h],
+        orientation,
       });
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        throw new Error(data.error || `export failed: ${res.status}`);
+      for (let i = 0; i < pages.length; i++) {
+        const page = pages[i];
+        if (!page?.svg) continue;
+        if (i > 0) {
+          pdf.addPage([targetMm.w, targetMm.h], orientation);
+        }
+        const normalized = normalizePdfSvg(page.svg, size, targetMm, fontSizePx, page.opts);
+        const doc = new DOMParser().parseFromString(normalized, "image/svg+xml");
+        const svgEl = doc.querySelector("svg");
+        if (!svgEl) continue;
+        await svg2pdf(svgEl, pdf, { x: 0, y: 0, width: targetMm.w, height: targetMm.h });
       }
-        const data = await res.json().catch(() => ({}));
-        if (data?.name) {
-          setExportPdfInfo({ name: data.name });
+      setSelectedZoneId(prevSelected);
+      const baseName = (sourceName || "source").replace(/[\\/:*?"<>|]+/g, "_");
+      const pdfName = `${baseName}_output.pdf`;
+      pdf.save(pdfName);
+
+      const htmlNames = [];
+      try {
+        const html0 = buildSimulateHtml(scene, packedLabels, labelFontFamily, labelFontSize);
+        if (html0) {
+          const name0 = `${baseName}_simulate.html`;
+          await fetch("/api/save_html", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              name: name0,
+              html: html0,
+            }),
+          });
+          htmlNames.push(name0);
         }
-        const htmlNames = [];
-        try {
-          const baseName = data?.name
-            ? data.name.replace(/\.pdf$/i, "")
-            : "convoi";
-          const html0 = buildSimulateHtml(scene, packedLabels, labelFontFamily, labelFontSize);
-          if (html0) {
-            const name0 = `${baseName}_simulate.html`;
-            await fetch("/api/save_html", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({
-                name: name0,
-                html: html0,
-              }),
-            });
-            htmlNames.push(name0);
-          }
-        } catch {
-          // ignore html export errors
-        }
-        setExportHtmlInfo(htmlNames);
-        setExportMsg("Export PDF Done");
-        setTimeout(() => setExportMsg(""), 3000);
-      } catch (err) {
+      } catch {
+        // ignore html export errors
+      }
+      setExportHtmlInfo(htmlNames);
+      setExportMsg("Export PDF Done");
+      setTimeout(() => setExportMsg(""), 3000);
+    } catch (err) {
       setError(err.message || String(err));
     } finally {
       setExportPdfLoading(false);
@@ -2723,7 +2901,7 @@ export default function App() {
       loadScene(false);
     }, 500);
     return () => clearTimeout(id);
-  }, [packPadding, packMarginX, packMarginY, packBleed, packGrid, packAngle, packMode, autoPack]);
+  }, [packPadding, packMargin, packBleed, targetZones, packGrid, packAngle, packMode, autoPack]);
 
   const parsePackedSvg = (text) => {
     const doc = new DOMParser().parseFromString(text, "image/svg+xml");
@@ -2904,7 +3082,20 @@ export default function App() {
       }
       const data = await res.json().catch(() => ({}));
       if (data?.name) {
-        window.location = `/api/download_sim_video?name=${encodeURIComponent(data.name)}`;
+        const dl = await fetch(`/api/download_sim_video?name=${encodeURIComponent(data.name)}`);
+        if (!dl.ok) {
+          const msg = await dl.text().catch(() => "");
+          throw new Error(msg || `download failed: ${dl.status}`);
+        }
+        const blob = await dl.blob();
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = data.name;
+        document.body.appendChild(link);
+        link.click();
+        link.remove();
+        URL.revokeObjectURL(url);
       }
     } catch (err) {
       setError(err.message || String(err));
@@ -2920,15 +3111,16 @@ export default function App() {
     setSimPlaying((v) => !v);
   };
 
-  const injectSvgLabels = (svgText, labels, fontFamily, fontSize) => {
+  const injectSvgLabels = (svgText, labels, fontFamily, fontSize, centers = null) => {
     try {
       const doc = new DOMParser().parseFromString(svgText, "image/svg+xml");
       const svg = doc.querySelector("svg");
       if (!svg) return svgText;
       Array.from(svg.querySelectorAll("text")).forEach((n) => n.remove());
-      Object.values(labels || {}).forEach((lbl) => {
-        const x = Number(lbl.x);
-        const y = Number(lbl.y);
+      Object.entries(labels || {}).forEach(([zid, lbl]) => {
+        const c = centers?.[String(zid)];
+        const x = Number(c?.x ?? lbl.x);
+        const y = Number(c?.y ?? lbl.y);
         if (!Number.isFinite(x) || !Number.isFinite(y)) return;
         const text = doc.createElementNS("http://www.w3.org/2000/svg", "text");
         text.setAttribute("x", String(x));
@@ -2941,6 +3133,92 @@ export default function App() {
         text.textContent = String(lbl.label ?? "");
         svg.appendChild(text);
       });
+      return new XMLSerializer().serializeToString(svg);
+    } catch {
+      return svgText;
+    }
+  };
+
+  const handleSimHtmlDownload = () => {
+    if (!scene) return;
+    const html = buildSimulateHtml(scene, packedLabels, labelFontFamily, labelFontSize);
+    if (!html) return;
+    const baseName = (sourceName || "source").replace(/[\\/:*?"<>|]+/g, "_");
+    const name = `${baseName}_simulate.html`;
+    const blob = new Blob([html], { type: "text/html;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = name;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(url);
+  };
+
+  const normalizePdfSvg = (svgText, canvasSize, targetMm, fontSizePx = null, opts = {}) => {
+    try {
+      const doc = new DOMParser().parseFromString(svgText, "image/svg+xml");
+      const svg = doc.querySelector("svg");
+      if (!svg) return svgText;
+      const viewW = canvasSize?.w || 0;
+      const viewH = canvasSize?.h || 0;
+      if (viewW > 0 && viewH > 0) {
+        svg.setAttribute("viewBox", `0 0 ${viewW} ${viewH}`);
+      }
+      svg.setAttribute("width", `${targetMm.w}mm`);
+      svg.setAttribute("height", `${targetMm.h}mm`);
+      svg.setAttribute("style", "background:#ffffff");
+      const forceStroke = !!opts.forceStroke;
+      const removeFill = !!opts.removeFill;
+      const darkenExistingStroke = !!opts.darkenExistingStroke;
+      // Force any full-canvas rects to white.
+      Array.from(svg.querySelectorAll("rect")).forEach((r) => {
+        const w = parseFloat(r.getAttribute("width") || "0");
+        const h = parseFloat(r.getAttribute("height") || "0");
+        if (viewW > 0 && viewH > 0 && w >= viewW * 0.98 && h >= viewH * 0.98) {
+          r.setAttribute("fill", "#ffffff");
+          r.setAttribute("stroke", "none");
+        }
+        if (forceStroke) {
+          r.setAttribute("stroke", "#000000");
+          r.setAttribute("stroke-width", "1");
+        }
+        if (removeFill) {
+          r.setAttribute("fill", "none");
+        }
+      });
+      if (forceStroke) {
+        Array.from(svg.querySelectorAll("path,polyline,polygon,rect,line")).forEach((el) => {
+          el.setAttribute("stroke", "#000000");
+          el.setAttribute("stroke-width", "1");
+          if (removeFill) {
+            el.setAttribute("fill", "none");
+          }
+        });
+      } else if (darkenExistingStroke) {
+        Array.from(svg.querySelectorAll("path,polyline,polygon,rect,line")).forEach((el) => {
+          const stroke = el.getAttribute("stroke");
+          if (!stroke || stroke === "none") return;
+          el.setAttribute("stroke", "#000000");
+          el.setAttribute("stroke-width", "1");
+        });
+      }
+      const rect = doc.createElementNS("http://www.w3.org/2000/svg", "rect");
+      rect.setAttribute("x", "0");
+      rect.setAttribute("y", "0");
+      rect.setAttribute("width", String(viewW || targetMm.w));
+      rect.setAttribute("height", String(viewH || targetMm.h));
+      rect.setAttribute("fill", "#ffffff");
+      svg.insertBefore(rect, svg.firstChild);
+      if (fontSizePx != null) {
+        Array.from(svg.querySelectorAll("text")).forEach((t) => {
+          t.setAttribute("font-size", String(fontSizePx));
+          t.setAttribute("fill", "#000000");
+          t.setAttribute("stroke", "none");
+          t.setAttribute("stroke-width", "0");
+        });
+      }
       return new XMLSerializer().serializeToString(svg);
     } catch {
       return svgText;
@@ -3118,23 +3396,122 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene, stageSize, regionStageSize, region2StageSize, zoneStageSize, autoFit, leftTab]);
 
+  const recentOptions = useMemo(() => {
+    const options = [];
+    if (sourceFilename) {
+      options.push({ filename: sourceFilename, name: sourceName || sourceFilename });
+    }
+    (recentFiles || []).forEach((item) => {
+      if (!item?.filename || item.filename === sourceFilename) return;
+      options.push(item);
+    });
+    return options;
+  }, [recentFiles, sourceFilename, sourceName]);
+
   return (
     <div className="app">
       <div className="content">
         <div className="column-left">
           <div className="panel toolbar">
-            <button onClick={loadScene}>Load</button>
-            <button onClick={exportPdf}>Export PDF</button>
             <button
+              className="icon-only"
+              onClick={handleLoadClick}
+              title="Load"
+              aria-label="Load"
+            >
+              <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+                <path
+                  d="M10 3v9m0 0l-3-3m3 3l3-3M4 15h12"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  fill="none"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </button>
+            <input
+              ref={sourceFileInputRef}
+              type="file"
+              accept=".svg"
+              style={{ display: "none" }}
+              onChange={(e) => {
+                const file = e.target.files?.[0];
+                if (file) handleFileUpload(file);
+              }}
+            />
+            <label className="toolbar-select" htmlFor="recent-files">
+              Recent
+              <select
+                id="recent-files"
+                value={sourceFilename || ""}
+                onChange={(e) => handleRecentSelect(e.target.value)}
+              >
+                {recentOptions.length ? (
+                  recentOptions.map((item) => (
+                    <option key={item.filename} value={item.filename}>
+                      {item.name || item.filename}
+                    </option>
+                  ))
+                ) : (
+                  <option value="">None</option>
+                )}
+              </select>
+            </label>
+            <button className="icon-only" onClick={exportPdf} title="Export PDF" aria-label="Export PDF">
+              <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+                <path
+                  d="M6 3h5l3 3v11H6z"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  fill="none"
+                  strokeLinejoin="round"
+                />
+                <path d="M11 3v3h3" stroke="currentColor" strokeWidth="2" fill="none" />
+              </svg>
+            </button>
+            <button
+              className="icon-only"
               onClick={() => {
                 setSimProgress(0);
                 setSimPlaying(false);
                 setShowSim(true);
               }}
+              title="Simulate"
+              aria-label="Simulate"
             >
-              Simulate
+              <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+                <polygon points="6,4 16,10 6,16" fill="currentColor" />
+              </svg>
             </button>
             <div className="toolbar-spacer" />
+            <button
+              className="icon-only"
+              onClick={async () => {
+                setPackedLoading(true);
+                try {
+                  let source = zoneScene || scene;
+                  if (!source || !source.canvas || !source.regions || !source.zone_id) {
+                    const loaded = await loadScene(false, true, true);
+                    source = loaded?.zoneScene || loaded?.scene || source;
+                  }
+                  if (source && source.canvas && source.regions && source.zone_id) {
+                    await refreshPackedFromZoneScene(source);
+                  }
+                } finally {
+                  setPackedLoading(false);
+                }
+              }}
+              title="Compute"
+              aria-label="Compute"
+            >
+              <svg viewBox="0 0 20 20" width="16" height="16" aria-hidden="true">
+                <path
+                  d="M10 3l2 4 4 2-4 2-2 4-2-4-4-2 4-2z"
+                  fill="currentColor"
+                />
+              </svg>
+            </button>
             {exportMsg ? <div className="meta">{exportMsg}</div> : null}
             {error ? <div className="error">{error}</div> : null}
           </div>
@@ -3145,17 +3522,39 @@ export default function App() {
               <button className={leftTab === 'region' ? 'active' : ''} onClick={() => setLeftTab('region')}>Region</button>
               <button className={leftTab === 'zone' ? 'active' : ''} onClick={() => setLeftTab('zone')}>Zone</button>
             </div>
-            <div className="view-tabs-scale">
-              <label htmlFor="source-scale">Scale</label>
-              <input
-                id="source-scale"
-                type="number"
-                min="0.1"
-                max="5"
-                step="0.01"
-                value={sourceScale}
-                onChange={(e) => handleSourceScaleChange(e.target.value)}
-              />
+            <div className="view-tabs-controls">
+              <label htmlFor="target-zones">
+                Max Zones
+                <input
+                  id="target-zones"
+                  type="number"
+                  min="1"
+                  max="999"
+                  step="1"
+                  value={targetZones}
+                  onChange={(e) => {
+                    const next = parseInt(e.target.value, 10);
+                    if (!Number.isFinite(next)) return;
+                    setTargetZones(Math.max(1, next));
+                  }}
+                />
+              </label>
+              <label htmlFor="pack-margin">
+                Margin
+                <input
+                  id="pack-margin"
+                  type="number"
+                  min="0"
+                  max="200"
+                  step="1"
+                  value={packMargin}
+                  onChange={(e) => {
+                    const next = parseFloat(e.target.value || "0");
+                    if (!Number.isFinite(next)) return;
+                    setPackMargin(next);
+                  }}
+                />
+              </label>
             </div>
           </div>
 
@@ -3560,12 +3959,6 @@ export default function App() {
               <div className="preview-title">Zone (Konva)</div>
               <div className="preview-controls">
                 <button
-                  className="btn"
-                  onClick={() => loadScene(false, true, false)}
-                >
-                  Compute
-                </button>
-                <button
                   className="icon-button"
                   title="Download"
                     onClick={() =>
@@ -3715,7 +4108,7 @@ export default function App() {
               Box
             </button>
           </div>
-          <div className={`preview region-stage ${sceneLoading ? "is-loading" : ""}`} ref={regionWrapRef} style={{ height: '100%'}}>
+          <div className={`preview region-stage ${sceneLoading || packedLoading ? "is-loading" : ""}`} ref={regionWrapRef} style={{ height: '100%'}}>
             <div className="preview-header">
               <div className="preview-title">
                 {rightTab === "packed" ? "Packed (Konva)" : "Packed (Box)"}
@@ -3905,11 +4298,7 @@ export default function App() {
                   {overlayItems.map((item) => {
                     if (!item?.img || item.zid == null) return null;
                     const packed = transformOverlayToPacked(item);
-                    const bin =
-                      packedSource?.placement_bin?.[item.zid] ??
-                      packedSource?.placement_bin?.[parseInt(item.zid, 10)];
-                    const page = bin === 1 ? 1 : 0;
-                    const xOffset = page === 1 ? (packedSource?.canvas?.w || 0) + 40 : 0;
+                    const xOffset = 0;
                     return (
                       <Image
                         key={`po-${item.id}`}
@@ -3932,11 +4321,7 @@ export default function App() {
                 {rightTab === "packed" ? (
                 <Layer name="packed-stroke" visible={showStroke}>
                   {Object.entries(packedSource.zone_boundaries || {}).flatMap(([zid, paths]) => {
-                    const bin =
-                      packedSource?.placement_bin?.[zid] ??
-                      packedSource?.placement_bin?.[parseInt(zid, 10)];
-                    const page = bin === 1 ? 1 : 0;
-                    const xOffset = page === 1 ? (packedSource?.canvas?.w || 0) + 40 : 0;
+                    const xOffset = 0;
                       return (paths || []).map((p, i) => {
                         const shift =
                           packedSource.zone_shift?.[zid] ||
@@ -3966,14 +4351,75 @@ export default function App() {
                   })}
                 </Layer>
                 ) : null}
+                {rightTab === "box" ? (
+                <Layer name="packed-box-polys">
+                  {(packedSource.zone_pack_polys && packedSource.zone_pack_polys.length
+                    ? packedSource.zone_pack_polys.map((poly, idx) => {
+                        const zid = packedSource.zone_order?.[idx];
+                        if (zid == null) return null;
+                        const shift =
+                          packedSource.zone_shift?.[zid] ||
+                          packedSource.zone_shift?.[parseInt(zid, 10)];
+                        if (!shift) return null;
+                        const rot =
+                          packedSource.zone_rot?.[zid] ??
+                          packedSource.zone_rot?.[parseInt(zid, 10)] ??
+                          0;
+                        const center =
+                          packedSource.zone_center?.[zid] ||
+                          packedSource.zone_center?.[parseInt(zid, 10)] ||
+                          [0, 0];
+                        const tpts = transformPath(poly, shift, rot, center);
+                        const xOffset = 0;
+                        return (
+                          <Line
+                            key={`pb-zone-${zid}`}
+                            points={toPoints(offsetPoints(tpts, xOffset, 0))}
+                            closed
+                            fill="rgba(255,255,255,0.06)"
+                            stroke={showStroke ? "#f5f6ff" : "transparent"}
+                            strokeWidth={1 / regionScale}
+                            strokeScaleEnabled={false}
+                            listening={false}
+                          />
+                        );
+                      })
+                    : (packedSource.regions || []).map((poly, idx) => {
+                        const zid = packedSource.zone_id?.[idx];
+                        const shift =
+                          packedSource.zone_shift?.[zid] ||
+                          packedSource.zone_shift?.[parseInt(zid, 10)];
+                        if (!shift) return null;
+                        const rot =
+                          packedSource.zone_rot?.[zid] ??
+                          packedSource.zone_rot?.[parseInt(zid, 10)] ??
+                          0;
+                        const center =
+                          packedSource.zone_center?.[zid] ||
+                          packedSource.zone_center?.[parseInt(zid, 10)] ||
+                          [0, 0];
+                        const tpts = transformPath(poly, shift, rot, center);
+                        const xOffset = 0;
+                        const fill = packedSource.region_colors?.[idx];
+                        return (
+                          <Line
+                            key={`pb-poly-${idx}`}
+                            points={toPoints(offsetPoints(tpts, xOffset, 0))}
+                            closed
+                            fill={showImages ? fill : "transparent"}
+                            stroke={showStroke ? "#f5f6ff" : "transparent"}
+                            strokeWidth={1 / regionScale}
+                            strokeScaleEnabled={false}
+                            listening={false}
+                          />
+                        );
+                      }))}
+                </Layer>
+                ) : null}
                 {rightTab === "packed" ? (
                 <Layer name="packed-hit">
                   {Object.entries(packedSource.zone_boundaries || {}).flatMap(([zid, paths]) => {
-                    const bin =
-                      packedSource?.placement_bin?.[zid] ??
-                      packedSource?.placement_bin?.[parseInt(zid, 10)];
-                    const page = bin === 1 ? 1 : 0;
-                    const xOffset = page === 1 ? (packedSource?.canvas?.w || 0) + 40 : 0;
+                    const xOffset = 0;
                     return (paths || []).map((p, i) => {
                       const shift =
                         packedSource.zone_shift?.[zid] ||
@@ -3995,7 +4441,7 @@ export default function App() {
                           stroke="rgba(0,0,0,0)"
                           strokeWidth={8 / regionScale}
                           strokeScaleEnabled={false}
-                          onClick={() => setSelectedZoneId(String(zid))}
+                          onClick={() => handlePackedZoneClick(zid)}
                         />
                       );
                       });
@@ -4056,7 +4502,7 @@ export default function App() {
                 ) : null}
               </Stage>
             ) : null}
-            {sceneLoading ? <div className="loading-overlay">Loading...</div> : null}
+            {sceneLoading || packedLoading ? <div className="loading-overlay">Loading...</div> : null}
             {packedBleedError ? <div className="error">{packedBleedError}</div> : null}
             {packedBleedError2 ? <div className="error">{packedBleedError2}</div> : null}
           </div>
@@ -4113,9 +4559,6 @@ export default function App() {
             <div className="sim-status">
               {simActiveLabel ? `Moving index: ${simActiveLabel}` : "Moving index: -"}
             </div>
-            <div className="sim-body" ref={simWrapRef}>
-              {simStage}
-            </div>
             <div className="sim-controls">
               <button className="icon-button" onClick={handleSimPlayToggle}>
                 {simPlaying ? (
@@ -4137,6 +4580,9 @@ export default function App() {
                 value={simProgress}
                 onChange={(e) => setSimProgress(parseFloat(e.target.value))}
               />
+              <button className="btn ghost" onClick={handleSimHtmlDownload}>
+                Download HTML
+              </button>
               <button
                 className="btn"
                 onClick={handleSimVideoDownload}
@@ -4144,6 +4590,9 @@ export default function App() {
               >
                 {simVideoLoading ? "Creating..." : "Download GIF"}
               </button>
+            </div>
+            <div className="sim-body" ref={simWrapRef}>
+              {simStage}
             </div>
           </div>
         </div>

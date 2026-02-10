@@ -3,7 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-SVG_PATH = Path("convoi.svg")
+SVG_PATH = Path(os.getenv("SVG_PATH", "convoi.svg"))
 OUT_LOG = Path("regions_log.txt")
 OUT_PNG = Path("regions_log.png")
 OUT_ZONES_LOG = Path("zones_log.txt")
@@ -32,6 +32,16 @@ OUT_DEBUG_TRI_SMALL_SVG = Path("debug_tri_small.svg")
 OUT_DEBUG_POLY_RAW_SVG = Path("debug_poly_raw.svg")
 OUT_DEBUG_POLY_FINAL_SVG = Path("debug_poly_final.svg")
 OUT_PACK_LABELS_JSON = Path("packed_labels.json")
+
+_BASE_OUTPUTS = {
+    "OUT_LOG": OUT_LOG,
+    "OUT_ZONES_LOG": OUT_ZONES_LOG,
+    "OUT_PACK_LOG": OUT_PACK_LOG,
+    "OUT_PACK_MISSING_LOG": OUT_PACK_MISSING_LOG,
+    "OUT_PACK_RASTER_LOG": OUT_PACK_RASTER_LOG,
+    "OUT_ZONES_JSON": OUT_ZONES_JSON,
+    "OUT_PACK_LABELS_JSON": OUT_PACK_LABELS_JSON,
+}
 
 SNAP = 0.01
 NEIGHBOR_EPS = 0.5
@@ -67,6 +77,7 @@ PACK_BLEED = 3.5
 
 def _apply_pack_env() -> None:
     global DRAW_SCALE, PADDING, PACK_MARGIN_X, PACK_MARGIN_Y, PACK_BLEED, PACK_GRID_STEP, PACK_ANGLE_STEP, PACK_MODE
+    global TARGET_ZONES
     global SMALL_ZONE_AREA, SMALL_ZONE_BBOX
     if "DRAW_SCALE" in os.environ:
         DRAW_SCALE = float(os.environ["DRAW_SCALE"])
@@ -84,7 +95,30 @@ def _apply_pack_env() -> None:
         PACK_ANGLE_STEP = float(os.environ["PACK_ANGLE_STEP"])
     if "PACK_MODE" in os.environ:
         PACK_MODE = str(os.environ["PACK_MODE"]).strip().lower()
+    if "TARGET_ZONES" in os.environ:
+        TARGET_ZONES = int(float(os.environ["TARGET_ZONES"]))
     if "SMALL_ZONE_AREA" in os.environ:
         SMALL_ZONE_AREA = float(os.environ["SMALL_ZONE_AREA"])
     if "SMALL_ZONE_BBOX" in os.environ:
         SMALL_ZONE_BBOX = float(os.environ["SMALL_ZONE_BBOX"])
+
+
+def _safe_prefix(value: str) -> str:
+    cleaned = "".join(ch if (ch.isalnum() or ch in ("-", "_")) else "_" for ch in value.strip())
+    return cleaned.strip("_")
+
+
+def set_output_prefix(prefix: str) -> None:
+    global OUT_LOG, OUT_ZONES_LOG, OUT_PACK_LOG, OUT_PACK_MISSING_LOG, OUT_PACK_RASTER_LOG
+    global OUT_ZONES_JSON, OUT_PACK_LABELS_JSON
+    safe = _safe_prefix(prefix or "")
+    def _pref(name: str) -> Path:
+        return Path(f"{safe}${name}") if safe else Path(name)
+
+    OUT_LOG = _pref(_BASE_OUTPUTS["OUT_LOG"].name)
+    OUT_ZONES_LOG = _pref(_BASE_OUTPUTS["OUT_ZONES_LOG"].name)
+    OUT_PACK_LOG = _pref(_BASE_OUTPUTS["OUT_PACK_LOG"].name)
+    OUT_PACK_MISSING_LOG = _pref(_BASE_OUTPUTS["OUT_PACK_MISSING_LOG"].name)
+    OUT_PACK_RASTER_LOG = _pref(_BASE_OUTPUTS["OUT_PACK_RASTER_LOG"].name)
+    OUT_ZONES_JSON = _pref(_BASE_OUTPUTS["OUT_ZONES_JSON"].name)
+    OUT_PACK_LABELS_JSON = _pref(_BASE_OUTPUTS["OUT_PACK_LABELS_JSON"].name)
