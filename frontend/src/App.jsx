@@ -147,6 +147,71 @@ const buildPackedEmptyCells = (data, packedPolyData) => {
   return pts;
 };
 
+const scalePts = (pts, ratio) => (pts || []).map((p) => [p[0] * ratio, p[1] * ratio]);
+
+const scaleSegments = (segments, ratio) =>
+  (segments || []).map((seg) => scalePts(seg, ratio));
+
+const scaleSceneData = (scene, ratio) => {
+  if (!scene || ratio === 1) return scene;
+  const scaleNum = (v) => (Number.isFinite(v) ? v * ratio : v);
+  const scalePolyList = (polys) => (polys || []).map((poly) => scalePts(poly || [], ratio));
+  const scaleLineDict = (dict) => {
+    const out = {};
+    Object.entries(dict || {}).forEach(([k, paths]) => {
+      out[k] = (paths || []).map((path) => scalePts(path || [], ratio));
+    });
+    return out;
+  };
+  const scaleLabelDict = (dict) => {
+    const out = {};
+    Object.entries(dict || {}).forEach(([k, v]) => {
+      if (!v) return;
+      out[k] = { ...v, x: scaleNum(v.x), y: scaleNum(v.y) };
+    });
+    return out;
+  };
+  const scaleShiftDict = (dict) => {
+    const out = {};
+    Object.entries(dict || {}).forEach(([k, v]) => {
+      if (!Array.isArray(v) || v.length < 2) return;
+      out[k] = [scaleNum(v[0]), scaleNum(v[1])];
+    });
+    return out;
+  };
+  const scalePlacements = (placements) =>
+    (placements || []).map((p) =>
+      Array.isArray(p) && p.length >= 4
+        ? [scaleNum(p[0]), scaleNum(p[1]), scaleNum(p[2]), scaleNum(p[3]), p[4]]
+        : p
+    );
+  const scaleRotInfo = (rotInfo) =>
+    (rotInfo || []).map((info) => {
+      if (!info || typeof info !== "object") return info;
+      const out = { ...info };
+      ["cx", "cy", "minx", "miny", "maxx", "maxy"].forEach((k) => {
+        if (Number.isFinite(out[k])) out[k] = out[k] * ratio;
+      });
+      return out;
+    });
+
+  return {
+    ...scene,
+    canvas: scene.canvas
+      ? { ...scene.canvas, w: scaleNum(scene.canvas.w), h: scaleNum(scene.canvas.h) }
+      : scene.canvas,
+    regions: scalePolyList(scene.regions),
+    zone_boundaries: scaleLineDict(scene.zone_boundaries),
+    zone_labels: scaleLabelDict(scene.zone_labels),
+    region_labels: scaleLabelDict(scene.region_labels),
+    zone_pack_polys: scalePolyList(scene.zone_pack_polys),
+    placements: scalePlacements(scene.placements),
+    rot_info: scaleRotInfo(scene.rot_info),
+    zone_shift: scaleShiftDict(scene.zone_shift),
+    zone_center: scaleShiftDict(scene.zone_center),
+  };
+};
+
 const logPackedPreview = (data) => {
   if (!data) return;
   const placements = data.placements || [];
@@ -779,6 +844,7 @@ const polyAreaAndCentroid = (poly) => {
 
 export default function App() {
   const [snap, setSnap] = useState(1);
+  const [sourceScale, setSourceScale] = useState(1);
   const [scene, setScene] = useState(null);
   const [zoneScene, setZoneScene] = useState(null);
   const [error, setError] = useState("");
@@ -870,6 +936,62 @@ export default function App() {
   const [selectedOverlayId, setSelectedOverlayId] = useState(null);
   const [overlayFill, setOverlayFill] = useState("#000000");
   const [zoneClickLogs, setZoneClickLogs] = useState([]);
+
+  const handleSourceScaleChange = (value) => {
+    const next = parseFloat(value);
+    if (!Number.isFinite(next) || next <= 0) return;
+    const prev = sourceScale || 1;
+    if (Math.abs(next - prev) < 1e-6) return;
+    const ratio = next / prev;
+    setSourceScale(next);
+
+    setSvgSize((s) => ({ w: s.w * ratio, h: s.h * ratio }));
+    setRawSegments((s) => scaleSegments(s, ratio));
+    setSvgFallback((s) => scaleSegments(s, ratio));
+    setBorderSegments((s) => scaleSegments(s, ratio));
+    setNodes((items) => items.map((n) => ({ ...n, x: n.x * ratio, y: n.y * ratio })));
+    setOverlayItems((items) =>
+      items.map((item) => ({
+        ...item,
+        x: item.x * ratio,
+        y: item.y * ratio,
+        width: item.width * ratio,
+        height: item.height * ratio,
+      }))
+    );
+    setLabels((items) =>
+      items.map((lbl) => ({ ...lbl, x: lbl.x * ratio, y: lbl.y * ratio }))
+    );
+    setPackedLabels((items) =>
+      items.map((lbl) => ({ ...lbl, x: lbl.x * ratio, y: lbl.y * ratio }))
+    );
+    setPackedEmptyCells((cells) => cells.map((c) => [c[0] * ratio, c[1] * ratio]));
+
+    const nextScene = scaleSceneData(scene, ratio);
+    const nextZoneScene = scaleSceneData(zoneScene, ratio);
+    if (nextScene !== scene) setScene(nextScene);
+    if (nextZoneScene !== zoneScene) setZoneScene(nextZoneScene);
+
+    if (zoneClickCacheRef.current?.length) {
+      zoneClickCacheRef.current = zoneClickCacheRef.current.map((pt) => ({
+        ...pt,
+        x: pt.x * ratio,
+        y: pt.y * ratio,
+      }));
+      fetch("/api/source_zone_click", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clicks: zoneClickCacheRef.current }),
+      }).catch(() => {});
+    }
+
+    const packedSource = nextZoneScene || nextScene;
+    if (packedSource) {
+      const packedPolyData = buildPackedPolyData(packedSource);
+      setPackedEmptyCells(buildPackedEmptyCells(packedSource, packedPolyData));
+      refreshPackedFromZoneScene(packedSource);
+    }
+  };
 
   const simZoneIds = useMemo(() => {
     const ids = Object.keys(scene?.zone_boundaries || {});
@@ -1326,8 +1448,11 @@ export default function App() {
       const svgRes = await fetch("/out/convoi.svg");
       if (!svgRes.ok) throw new Error(`svg fetch failed: ${svgRes.status}`);
       const svgText = await svgRes.text();
+      const scaleRatio = sourceScale || 1;
       const parsedSize = parseSvgSize(svgText);
-      setSvgSize(parsedSize);
+      const scaledSize =
+        scaleRatio === 1 ? parsedSize : { w: parsedSize.w * scaleRatio, h: parsedSize.h * scaleRatio };
+      setSvgSize(scaledSize);
       const overlayParsed = parseOverlayItems(svgText);
       if (overlayParsed.length) {
         const hydrated = (
@@ -1348,14 +1473,26 @@ export default function App() {
             })
           )
         ).filter(Boolean);
-        setOverlayItems(hydrated);
+        const scaledOverlays =
+          scaleRatio === 1
+            ? hydrated
+            : hydrated.map((item) => ({
+                ...item,
+                x: item.x * scaleRatio,
+                y: item.y * scaleRatio,
+                width: item.width * scaleRatio,
+                height: item.height * scaleRatio,
+              }));
+        setOverlayItems(scaledOverlays);
       } else {
         setOverlayItems([]);
       }
       setSelectedOverlayId(null);
       const parsed = buildSegmentsFromSvg(svgText);
-      const segments = parsed.segments;
-      const borders = parsed.borderSegments;
+      const segmentsRaw = parsed.segments;
+      const bordersRaw = parsed.borderSegments;
+      const segments = scaleRatio === 1 ? segmentsRaw : scaleSegments(segmentsRaw, scaleRatio);
+      const borders = scaleRatio === 1 ? bordersRaw : scaleSegments(bordersRaw, scaleRatio);
       setSvgFallback(segments);
       setBorderSegments(borders);
       // no background rendering; keep only geometry
@@ -1382,14 +1519,19 @@ export default function App() {
         throw new Error(`scene fetch failed: ${res.status}`);
       }
       const data = await res.json();
-      setScene(data);
+      const scaledData = scaleRatio === 1 ? data : scaleSceneData(data, scaleRatio);
+      setScene(scaledData);
       if (updateZone) {
-        let zoneData = data;
+        let zoneData = scaledData;
         try {
           const clickRes = await fetch("/api/source_zone_click");
           if (clickRes.ok) {
             const clickJson = await clickRes.json();
-            const clicks = normalizeClickCache(clickJson);
+            const clicksRaw = normalizeClickCache(clickJson);
+            const clicks =
+              scaleRatio === 1
+                ? clicksRaw
+                : clicksRaw.map((pt) => ({ ...pt, x: pt.x * scaleRatio, y: pt.y * scaleRatio }));
             zoneClickCacheRef.current = clicks;
             if (clicks.length) {
               zoneData = applyZoneClickCache(zoneData, clicks);
@@ -1401,11 +1543,11 @@ export default function App() {
         setZoneScene(zoneData);
         await refreshPackedFromZoneScene(zoneData);
       }
-      logPackedPreview(data);
-      if (typeof data.draw_scale === "number") {
-        setDrawScale(data.draw_scale);
+      logPackedPreview(scaledData);
+      if (typeof scaledData.draw_scale === "number") {
+        setDrawScale(scaledData.draw_scale);
       }
-        const initLabels = Object.values(data.zone_labels || {}).map((v) => ({
+        const initLabels = Object.values(scaledData.zone_labels || {}).map((v) => ({
           id: `z-${v.label}`,
           x: v.x,
           y: v.y,
@@ -1415,8 +1557,8 @@ export default function App() {
         if (updatePacked) {
           setPackedImageSrc(`/out/packed.svg?t=${Date.now()}`);
           setPackedImageSrc2(`/out/packed_page2.svg?t=${Date.now()}`);
-          const packedPolyData = buildPackedPolyData(data);
-          const emptyCells = buildPackedEmptyCells(data, packedPolyData);
+          const packedPolyData = buildPackedPolyData(scaledData);
+          const emptyCells = buildPackedEmptyCells(scaledData, packedPolyData);
           setPackedEmptyCells(emptyCells);
           let cachedPacked = {};
           try {
@@ -1429,10 +1571,10 @@ export default function App() {
           }
           const usedCell = new Set();
           const cellIndex = (pt) => `${Math.round(pt[0] / 10)}:${Math.round(pt[1] / 10)}`;
-          const nextPackedLabels = Object.entries(data.zone_labels || {}).map(([zid, v]) => {
-        const shift = data.zone_shift?.[zid] || data.zone_shift?.[parseInt(zid, 10)];
-        const rot = data.zone_rot?.[zid] ?? data.zone_rot?.[parseInt(zid, 10)] ?? 0;
-        const center = data.zone_center?.[zid] || data.zone_center?.[parseInt(zid, 10)] || [0, 0];
+          const nextPackedLabels = Object.entries(scaledData.zone_labels || {}).map(([zid, v]) => {
+        const shift = scaledData.zone_shift?.[zid] || scaledData.zone_shift?.[parseInt(zid, 10)];
+        const rot = scaledData.zone_rot?.[zid] ?? scaledData.zone_rot?.[parseInt(zid, 10)] ?? 0;
+        const center = scaledData.zone_center?.[zid] || scaledData.zone_center?.[parseInt(zid, 10)] || [0, 0];
         let px = v.x;
         let py = v.y;
         const cached = cachedPacked?.[String(zid)];
@@ -2997,10 +3139,24 @@ export default function App() {
             {error ? <div className="error">{error}</div> : null}
           </div>
 
-          <div className="panel view-tabs">
-            <button className={leftTab === 'source' ? 'active' : ''} onClick={() => setLeftTab('source')}>Source</button>
-            <button className={leftTab === 'region' ? 'active' : ''} onClick={() => setLeftTab('region')}>Region</button>
-            <button className={leftTab === 'zone' ? 'active' : ''} onClick={() => setLeftTab('zone')}>Zone</button>
+          <div className="view-tabs-row">
+            <div className="panel view-tabs">
+              <button className={leftTab === 'source' ? 'active' : ''} onClick={() => setLeftTab('source')}>Source</button>
+              <button className={leftTab === 'region' ? 'active' : ''} onClick={() => setLeftTab('region')}>Region</button>
+              <button className={leftTab === 'zone' ? 'active' : ''} onClick={() => setLeftTab('zone')}>Zone</button>
+            </div>
+            <div className="view-tabs-scale">
+              <label htmlFor="source-scale">Scale</label>
+              <input
+                id="source-scale"
+                type="number"
+                min="0.1"
+                max="5"
+                step="0.01"
+                value={sourceScale}
+                onChange={(e) => handleSourceScaleChange(e.target.value)}
+              />
+            </div>
           </div>
 
           {leftTab === 'source' && (

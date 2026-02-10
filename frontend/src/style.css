@@ -320,6 +320,33 @@ body {
   width: fit-content;
 }
 
+.view-tabs-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 16px 0;
+}
+
+.view-tabs-scale {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: rgba(232, 235, 255, 0.75);
+  background: rgba(8, 12, 26, 0.65);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  padding: 6px 12px;
+}
+
+.view-tabs-scale input[type="number"] {
+  width: 70px;
+  padding: 4px 6px;
+  border-radius: 999px;
+  text-align: center;
+}
+
 .panel.view-tabs button {
   background: transparent;
   border: 1px solid transparent;
