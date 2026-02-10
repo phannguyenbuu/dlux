@@ -850,6 +850,7 @@ export default function App() {
   const [packedFillPaths2, setPackedFillPaths2] = useState([]);
   const [packedBleedPaths2, setPackedBleedPaths2] = useState([]);
   const [packedBleedError2, setPackedBleedError2] = useState("");
+  const [packedEmptyCells, setPackedEmptyCells] = useState([]);
   const [edgeMode, setEdgeMode] = useState(false);
   const [addNodeMode, setAddNodeMode] = useState(false);
   const [deleteEdgeMode, setDeleteEdgeMode] = useState(false);
@@ -1398,6 +1399,7 @@ export default function App() {
           zoneClickCacheRef.current = [];
         }
         setZoneScene(zoneData);
+        await refreshPackedFromZoneScene(zoneData);
       }
       logPackedPreview(data);
       if (typeof data.draw_scale === "number") {
@@ -1415,6 +1417,7 @@ export default function App() {
           setPackedImageSrc2(`/out/packed_page2.svg?t=${Date.now()}`);
           const packedPolyData = buildPackedPolyData(data);
           const emptyCells = buildPackedEmptyCells(data, packedPolyData);
+          setPackedEmptyCells(emptyCells);
           let cachedPacked = {};
           try {
             const labelRes = await fetch("/api/packed_labels");
@@ -2115,6 +2118,95 @@ export default function App() {
     return out;
   }, [scene]);
 
+  const packedSource = zoneScene || scene;
+
+  const packedEmptyCellsDerived = useMemo(() => {
+    if (!packedSource) return [];
+    const packedPolyData = buildPackedPolyData(packedSource);
+    return buildPackedEmptyCells(packedSource, packedPolyData);
+  }, [packedSource]);
+
+  
+
+  const packedCellsByBin = useMemo(() => {
+    if (!packedEmptyCellsDerived.length || !packedSource?.canvas) {
+      return { 0: packedEmptyCellsDerived, 1: [] };
+    }
+    const offset = (packedSource.canvas.w || 0) + 40;
+    const cells1 = packedEmptyCellsDerived.map((c) => [c[0] + offset, c[1]]);
+    return { 0: packedEmptyCellsDerived, 1: cells1 };
+  }, [packedEmptyCellsDerived, packedSource]);
+
+  const packedLabelSnappedAll = useMemo(() => {
+    if (!packedSource?.zone_boundaries) return [];
+    const out = [];
+    const used = new Set();
+    const cellSize = 6;
+    const cellIndex = (x, y) => {
+      const gx = Math.round(x / cellSize);
+      const gy = Math.round(y / cellSize);
+      return { gx, gy };
+    };
+    const blockCell = (gx, gy) => {
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          used.add(`${gx + dx}:${gy + dy}`);
+        }
+      }
+    };
+    Object.entries(packedSource.zone_boundaries || {}).forEach(([zid, paths]) => {
+      if (!paths || !paths.length) return;
+      const shift =
+        packedSource.zone_shift?.[zid] ?? packedSource.zone_shift?.[parseInt(zid, 10)];
+      const rot =
+        packedSource.zone_rot?.[zid] ?? packedSource.zone_rot?.[parseInt(zid, 10)] ?? 0;
+      const center =
+        packedSource.zone_center?.[zid] ??
+        packedSource.zone_center?.[parseInt(zid, 10)] ??
+        [0, 0];
+      let best = null;
+      (paths || []).forEach((p) => {
+        const tpts = transformPath(p, shift, rot, center);
+        if (!tpts || tpts.length < 3) return;
+        const { area, cx, cy } = polyAreaAndCentroid(tpts);
+        const absArea = Math.abs(area);
+        if (!best || absArea > best.absArea) best = { absArea, cx, cy };
+      });
+      if (!best) return;
+      const bin =
+        packedSource?.placement_bin?.[zid] ??
+        packedSource?.placement_bin?.[parseInt(zid, 10)];
+      const page = bin === 1 ? 1 : 0;
+      const pageOffset = page === 1 ? (packedSource?.canvas?.w || 0) + 40 : 0;
+      const anchorX = best.cx + pageOffset;
+      const anchorY = best.cy;
+      const cells = packedCellsByBin[page] || [];
+      let bestCell = null;
+      let bestD = Infinity;
+      for (const cell of cells) {
+        const dx0 = cell[0] - anchorX;
+        const dy0 = cell[1] - anchorY;
+        const d = dx0 * dx0 + dy0 * dy0;
+        const { gx, gy } = cellIndex(cell[0], cell[1]);
+        if (used.has(`${gx}:${gy}`)) continue;
+        if (d < bestD) {
+          bestD = d;
+          bestCell = cell;
+        }
+      }
+      const x = bestCell ? bestCell[0] : anchorX;
+      const y = bestCell ? bestCell[1] : anchorY;
+      if (bestCell) {
+        const { gx, gy } = cellIndex(bestCell[0], bestCell[1]);
+        blockCell(gx, gy);
+      }
+      const label = getZoneAlias(zid, packedSource);
+      out.push({ zid, label, x, y, page });
+    });
+    return out;
+  }, [packedCellsByBin, packedSource]);
+
+
   const findRegionAtPoint = (regions, pt) => {
     if (!regions || !pt) return -1;
     for (let i = 0; i < regions.length; i++) {
@@ -2127,6 +2219,53 @@ export default function App() {
     if (Array.isArray(payload)) return payload;
     if (payload && Array.isArray(payload.clicks)) return payload.clicks;
     return [];
+  };
+
+  const refreshPackedFromZoneScene = async (source) => {
+    if (!source?.regions || !source?.zone_id || !source?.canvas) return;
+    try {
+      const res = await fetch("/api/pack_from_scene", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          canvas: source.canvas,
+          regions: source.regions,
+          zone_id: source.zone_id,
+          region_colors: source.region_colors || [],
+        }),
+      });
+      if (!res.ok) {
+        throw new Error(`pack_from_scene failed: ${res.status}`);
+      }
+      const data = await res.json();
+      if (data?.packed_svg) {
+        const parsed = parsePackedSvg(data.packed_svg);
+        setPackedFillPaths(parsed.fillPaths);
+        setPackedBleedPaths(parsed.bleedPaths);
+        setPackedBleedError(parsed.hasBleed ? "" : "packed.svg missing bleed layer");
+      }
+      if (data?.packed_svg_page2) {
+        const parsed2 = parsePackedSvg(data.packed_svg_page2);
+        setPackedFillPaths2(parsed2.fillPaths);
+        setPackedBleedPaths2(parsed2.bleedPaths);
+        setPackedBleedError2(parsed2.hasBleed ? "" : "packed_page2.svg missing bleed layer");
+      }
+      if (data?.zone_shift || data?.zone_rot || data?.zone_center || data?.placement_bin) {
+        setZoneScene((prev) =>
+          prev
+            ? {
+                ...prev,
+                zone_shift: data.zone_shift || prev.zone_shift,
+                zone_rot: data.zone_rot || prev.zone_rot,
+                zone_center: data.zone_center || prev.zone_center,
+                placement_bin: data.placement_bin || prev.placement_bin,
+              }
+            : prev
+        );
+      }
+    } catch (err) {
+      setPackedBleedError(err.message || String(err));
+    }
   };
 
   const getZoneStageWorldPoint = (evt) => {
@@ -2271,14 +2410,17 @@ export default function App() {
     console.log(`[zone] region=${rid} attach=${targetAlias}`);
     setZoneScene(res.source);
     setSelectedZoneId(String(res.targetZid));
+    refreshPackedFromZoneScene(res.source);
   };
 
   const transformOverlayToPacked = (item) => {
-    if (!scene || !item || item.zid == null) return item;
+    const source = packedSource || scene;
+    if (!source || !item || item.zid == null) return item;
     const zid = item.zid;
-    const shift = scene.zone_shift?.[zid] || scene.zone_shift?.[parseInt(zid, 10)];
-    const rot = scene.zone_rot?.[zid] ?? scene.zone_rot?.[parseInt(zid, 10)] ?? 0;
-    const center = scene.zone_center?.[zid] || scene.zone_center?.[parseInt(zid, 10)] || [0, 0];
+    const shift = source.zone_shift?.[zid] || source.zone_shift?.[parseInt(zid, 10)];
+    const rot = source.zone_rot?.[zid] ?? source.zone_rot?.[parseInt(zid, 10)] ?? 0;
+    const center =
+      source.zone_center?.[zid] || source.zone_center?.[parseInt(zid, 10)] || [0, 0];
     const [pt] = transformPath([[item.x, item.y]], shift, rot, center);
     return {
       ...item,
@@ -2722,6 +2864,7 @@ export default function App() {
   };
 
   useEffect(() => {
+    if (zoneScene) return;
     if (!packedImageSrc) return;
     fetch(packedImageSrc)
       .then((res) => res.text())
@@ -2743,6 +2886,7 @@ export default function App() {
   }, [packedImageSrc]);
 
   useEffect(() => {
+    if (zoneScene) return;
     if (!packedImageSrc2) return;
     fetch(packedImageSrc2)
       .then((res) => res.text())
@@ -2773,7 +2917,7 @@ export default function App() {
           key={`s-${idx}`}
           points={[p1.x, p1.y, p2.x, p2.y]}
           stroke="#f5f6ff"
-          strokeWidth={(1 / scale) * 2}
+          strokeWidth={(1 / scale) * 2.5}
           strokeScaleEnabled={false}
         />
       );
@@ -2787,7 +2931,7 @@ export default function App() {
         key={`b-${idx}`}
         points={toPoints(seg)}
         stroke="#f5f6ff"
-        strokeWidth={(1 / scale) * 2}
+        strokeWidth={(1 / scale) * 2.5}
         strokeScaleEnabled={false}
       />
     ));
@@ -3056,7 +3200,7 @@ export default function App() {
                     ]}
                     stroke="#cfd6ff"
                     opacity={0.4}
-                    strokeWidth={(1 / mainViewScale) * 2}
+                    strokeWidth={(1 / mainViewScale) * 2.5}
                     strokeScaleEnabled={false}
                   />
                 </Layer>
@@ -3072,7 +3216,7 @@ export default function App() {
                     ]}
                     stroke="#ff3b30"
                     opacity={0.6}
-                    strokeWidth={(1 / mainViewScale) * 2}
+                    strokeWidth={(1 / mainViewScale) * 2.5}
                     strokeScaleEnabled={false}
                   />
                 </Layer>
@@ -3491,7 +3635,7 @@ export default function App() {
                 </button>
               </div>
             </div>
-            {scene ? (
+            {packedSource ? (
               <Stage
                 width={regionStageSize.w}
                 height={regionStageSize.h}
@@ -3504,13 +3648,13 @@ export default function App() {
                 ref={regionRef}
               >
                 <Layer>
-                  {scene?.canvas ? (
+                  {packedSource?.canvas ? (
                     <>
                       <Rect
                         x={0}
                         y={0}
-                        width={scene.canvas.w}
-                        height={scene.canvas.h}
+                        width={packedSource.canvas.w}
+                        height={packedSource.canvas.h}
                         stroke="#ffffff"
                         strokeWidth={2 / regionScale}
                         listening={false}
@@ -3522,10 +3666,10 @@ export default function App() {
                 <Layer name="packed-image" visible={showImages}>
                   <>
                     <Group
-                      x={(scene?.canvas?.w || 0) / 2}
-                      y={(scene?.canvas?.h || 0) / 2}
-                      offsetX={(scene?.canvas?.w || 0) / 2}
-                      offsetY={(scene?.canvas?.h || 0) / 2}
+                      x={(packedSource?.canvas?.w || 0) / 2}
+                      y={(packedSource?.canvas?.h || 0) / 2}
+                      offsetX={(packedSource?.canvas?.w || 0) / 2}
+                      offsetY={(packedSource?.canvas?.h || 0) / 2}
                     >
                       {packedFillPaths.map((p, idx) => (
                         <Path
@@ -3547,10 +3691,10 @@ export default function App() {
                       ))}
                     </Group>
                     <Group
-                      x={(scene?.canvas?.w || 0) / 2 + (scene?.canvas?.w || 0) + 40}
-                      y={(scene?.canvas?.h || 0) / 2}
-                      offsetX={(scene?.canvas?.w || 0) / 2}
-                      offsetY={(scene?.canvas?.h || 0) / 2}
+                      x={(packedSource?.canvas?.w || 0) / 2 + (packedSource?.canvas?.w || 0) + 40}
+                      y={(packedSource?.canvas?.h || 0) / 2}
+                      offsetX={(packedSource?.canvas?.w || 0) / 2}
+                      offsetY={(packedSource?.canvas?.h || 0) / 2}
                     >
                       {packedFillPaths2.map((p, idx) => (
                         <Path
@@ -3574,16 +3718,42 @@ export default function App() {
                   </>
                 </Layer>
                 ) : null}
+                {rightTab === "packed" && packedLabelSnappedAll.length ? (
+                <Layer name="packed-label-snapped">
+                  {packedLabelSnappedAll.map((lbl) => {
+                    const size = Math.max(labelFontSize / regionScale, 6 / regionScale);
+                    const metrics = measureText(lbl.label, size, labelFontFamily);
+                    return (
+                      <Text
+                        key={`psnap-${lbl.zid}`}
+                        x={lbl.x}
+                        y={lbl.y}
+                        text={lbl.label}
+                        fill="#ffffff"
+                        stroke="rgba(0,0,0,0.5)"
+                        strokeWidth={1 / regionScale}
+                        fontSize={size}
+                        fontFamily={labelFontFamily}
+                        align="center"
+                        verticalAlign="middle"
+                        offsetX={metrics.width / 2}
+                        offsetY={metrics.height / 2}
+                        listening={false}
+                      />
+                    );
+                  })}
+                </Layer>
+                ) : null}
                 {rightTab === "packed" ? (
                 <Layer name="packed-overlay">
                   {overlayItems.map((item) => {
                     if (!item?.img || item.zid == null) return null;
                     const packed = transformOverlayToPacked(item);
                     const bin =
-                      scene?.placement_bin?.[item.zid] ??
-                      scene?.placement_bin?.[parseInt(item.zid, 10)];
+                      packedSource?.placement_bin?.[item.zid] ??
+                      packedSource?.placement_bin?.[parseInt(item.zid, 10)];
                     const page = bin === 1 ? 1 : 0;
-                    const xOffset = page === 1 ? (scene?.canvas?.w || 0) + 40 : 0;
+                    const xOffset = page === 1 ? (packedSource?.canvas?.w || 0) + 40 : 0;
                     return (
                       <Image
                         key={`po-${item.id}`}
@@ -3605,17 +3775,25 @@ export default function App() {
                 ) : null}
                 {rightTab === "packed" ? (
                 <Layer name="packed-stroke" visible={showStroke}>
-                  {Object.entries(scene.zone_boundaries || {}).flatMap(([zid, paths]) => {
+                  {Object.entries(packedSource.zone_boundaries || {}).flatMap(([zid, paths]) => {
                     const bin =
-                      scene?.placement_bin?.[zid] ?? scene?.placement_bin?.[parseInt(zid, 10)];
+                      packedSource?.placement_bin?.[zid] ??
+                      packedSource?.placement_bin?.[parseInt(zid, 10)];
                     const page = bin === 1 ? 1 : 0;
-                    const xOffset = page === 1 ? (scene?.canvas?.w || 0) + 40 : 0;
+                    const xOffset = page === 1 ? (packedSource?.canvas?.w || 0) + 40 : 0;
                       return (paths || []).map((p, i) => {
-                        const shift = scene.zone_shift?.[zid] || scene.zone_shift?.[parseInt(zid, 10)];
+                        const shift =
+                          packedSource.zone_shift?.[zid] ||
+                          packedSource.zone_shift?.[parseInt(zid, 10)];
                         if (!shift) return null;
-                        const rot = scene.zone_rot?.[zid] ?? scene.zone_rot?.[parseInt(zid, 10)] ?? 0;
+                        const rot =
+                          packedSource.zone_rot?.[zid] ??
+                          packedSource.zone_rot?.[parseInt(zid, 10)] ??
+                          0;
                         const center =
-                          scene.zone_center?.[zid] || scene.zone_center?.[parseInt(zid, 10)] || [0, 0];
+                          packedSource.zone_center?.[zid] ||
+                          packedSource.zone_center?.[parseInt(zid, 10)] ||
+                          [0, 0];
                         const tpts = transformPath(p, shift, rot, center);
                         const isSelected = String(zid) === String(selectedZoneId);
                         return (
@@ -3634,17 +3812,25 @@ export default function App() {
                 ) : null}
                 {rightTab === "packed" ? (
                 <Layer name="packed-hit">
-                  {Object.entries(scene.zone_boundaries || {}).flatMap(([zid, paths]) => {
+                  {Object.entries(packedSource.zone_boundaries || {}).flatMap(([zid, paths]) => {
                     const bin =
-                      scene?.placement_bin?.[zid] ?? scene?.placement_bin?.[parseInt(zid, 10)];
+                      packedSource?.placement_bin?.[zid] ??
+                      packedSource?.placement_bin?.[parseInt(zid, 10)];
                     const page = bin === 1 ? 1 : 0;
-                    const xOffset = page === 1 ? (scene?.canvas?.w || 0) + 40 : 0;
+                    const xOffset = page === 1 ? (packedSource?.canvas?.w || 0) + 40 : 0;
                     return (paths || []).map((p, i) => {
-                      const shift = scene.zone_shift?.[zid] || scene.zone_shift?.[parseInt(zid, 10)];
+                      const shift =
+                        packedSource.zone_shift?.[zid] ||
+                        packedSource.zone_shift?.[parseInt(zid, 10)];
                       if (!shift) return null;
-                      const rot = scene.zone_rot?.[zid] ?? scene.zone_rot?.[parseInt(zid, 10)] ?? 0;
+                      const rot =
+                        packedSource.zone_rot?.[zid] ??
+                        packedSource.zone_rot?.[parseInt(zid, 10)] ??
+                        0;
                       const center =
-                        scene.zone_center?.[zid] || scene.zone_center?.[parseInt(zid, 10)] || [0, 0];
+                        packedSource.zone_center?.[zid] ||
+                        packedSource.zone_center?.[parseInt(zid, 10)] ||
+                        [0, 0];
                       const tpts = transformPath(p, shift, rot, center);
                       return (
                         <Line
@@ -3660,63 +3846,20 @@ export default function App() {
                   })}
                 </Layer>
                 ) : null}
-                {rightTab === "packed" ? (
-                <Layer name="packed-label" visible={showLabels}>
-                  <Group>
-                    {packedLabels.map((lbl) => {
-                      const bin =
-                        scene?.placement_bin?.[lbl.zid] ??
-                        scene?.placement_bin?.[parseInt(lbl.zid, 10)];
-                      const page = bin === 1 ? 1 : 0;
-                      const xOffset = page === 1 ? (scene?.canvas?.w || 0) + 40 : 0;
-                      const size = Math.max(labelFontSize / regionScale, 6 / regionScale);
-                      const metrics = measureText(lbl.label, size, labelFontFamily);
-                      const isSelected = String(lbl.zid) === String(selectedZoneId);
-                      return (
-                        <Text
-                          key={lbl.id}
-                          x={lbl.x + xOffset}
-                          y={lbl.y}
-                          text={lbl.label}
-                          fill={isSelected ? "#ff3b30" : "#ffffff"}
-                          stroke="rgba(0,0,0,0.5)"
-                          strokeWidth={1 / regionScale}
-                          fontSize={size}
-                          fontFamily={labelFontFamily}
-                          align="center"
-                          verticalAlign="middle"
-                          offsetX={metrics.width / 2}
-                          offsetY={metrics.height / 2}
-                          draggable
-                          onDragEnd={(e) => {
-                            const next = packedLabels.map((p) =>
-                              p.id === lbl.id ? { ...p, x: e.target.x(), y: e.target.y() } : p
-                            );
-                            setPackedLabels(next);
-                            try {
-                              fetch("/api/packed_labels", {
-                                method: "POST",
-                                headers: { "Content-Type": "application/json" },
-                                body: JSON.stringify({
-                                  [String(lbl.zid)]: {
-                                    x: e.target.x(),
-                                    y: e.target.y(),
-                                    label: lbl.label,
-                                  },
-                                }),
-                              });
-                            } catch {
-                              // ignore storage errors
-                            }
-                          }}
-                        />
-                      );
-                    })}
-                  </Group>
-                </Layer>
-                ) : null}
                 {rightTab === "box" ? (
                 <Layer name="packed-bbox">
+                  {packedEmptyCellsDerived.map((cell, idx) => (
+                    <Circle
+                      key={`pcell-${idx}`}
+                      x={cell[0]}
+                      y={cell[1]}
+                      radius={2.2 / regionScale}
+                      stroke="#00c2ff"
+                      strokeWidth={1 / regionScale}
+                      fill="rgba(0,194,255,0.12)"
+                      listening={false}
+                    />
+                  ))}
                   {packedBoxData.map((box) => {
                     const w = Math.max(0, box.maxx - box.minx);
                     const h = Math.max(0, box.maxy - box.miny);

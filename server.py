@@ -13,6 +13,7 @@ import xml.etree.ElementTree as ET
 from PIL import Image, ImageDraw, ImageFont
 
 import new_toy
+from scripts import packing, zones, config
 
 ROOT = Path(__file__).resolve().parent
 WEB_DIR = ROOT / "frontend"
@@ -23,6 +24,8 @@ PACKED_LABELS_JSON = ROOT / "packed_labels.json"
 ZONE_LABELS_JSON = ROOT / "zone_labels.json"
 SCENE_JSON = ROOT / "scene_cache.json"
 SOURCE_ZONE_CLICK_JSON = ROOT / "soure_zone_click.json"
+PACKED_ZONE_SCENE_SVG = ROOT / "packed_zone_scene.svg"
+PACKED_ZONE_SCENE_SVG_PAGE2 = ROOT / "packed_zone_scene_page2.svg"
 SVG_PATH = ROOT / "convoi.svg"
 SVG_BACKUP = ROOT / "convoi_backup.svg"
 EXPORT_DIR = ROOT / "export"
@@ -175,6 +178,161 @@ def api_save_packed_labels():
         data[str(key)] = val
     PACKED_LABELS_JSON.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return jsonify({"ok": True})
+
+
+def _color_to_bgr(val: Any) -> tuple[int, int, int]:
+    if isinstance(val, str):
+        s = val.strip()
+        if s.startswith("#"):
+            h = s[1:]
+            if len(h) == 3:
+                h = "".join(c * 2 for c in h)
+            if len(h) == 6:
+                try:
+                    r = int(h[0:2], 16)
+                    g = int(h[2:4], 16)
+                    b = int(h[4:6], 16)
+                    return (b, g, r)
+                except Exception:
+                    return (200, 200, 200)
+        if s.lower().startswith("rgb"):
+            nums = re.findall(r"[-+]?\d+", s)
+            if len(nums) >= 3:
+                try:
+                    r = int(nums[0])
+                    g = int(nums[1])
+                    b = int(nums[2])
+                    return (b, g, r)
+                except Exception:
+                    return (200, 200, 200)
+    if isinstance(val, (list, tuple)) and len(val) >= 3:
+        try:
+            r = int(val[0])
+            g = int(val[1])
+            b = int(val[2])
+            return (b, g, r)
+        except Exception:
+            return (200, 200, 200)
+    return (200, 200, 200)
+
+
+@app.post("/api/pack_from_scene")
+def api_pack_from_scene():
+    payload: Dict[str, Any] = request.get_json(silent=True) or {}
+    canvas = payload.get("canvas") or {}
+    w = int(canvas.get("w", 0) or 0)
+    h = int(canvas.get("h", 0) or 0)
+    if w <= 0 or h <= 0:
+        return jsonify({"ok": False, "error": "canvas missing"}), 400
+    regions = payload.get("regions") or []
+    zone_id = payload.get("zone_id") or []
+    if not regions or not zone_id:
+        return jsonify({"ok": False, "error": "regions/zone_id missing"}), 400
+    config._apply_pack_env()
+    polys = []
+    for poly in regions:
+        pts = []
+        for p in poly or []:
+            if not isinstance(p, (list, tuple)) or len(p) < 2:
+                continue
+            try:
+                pts.append((float(p[0]), float(p[1])))
+            except Exception:
+                continue
+        if pts:
+            polys.append(pts)
+        else:
+            polys.append([])
+    zone_polys, zone_order, _zone_poly_debug = zones.build_zone_polys(polys, zone_id)
+    zone_pack_polys = packing._build_zone_pack_polys(
+        zone_polys, float(config.PACK_BLEED), bevel_angle=60.0
+    )
+    zone_pack_centers = []
+    for p in zone_pack_polys:
+        if p:
+            pg = packing.Polygon(p)
+            if pg.is_empty:
+                zone_pack_centers.append((0.0, 0.0))
+            else:
+                c = pg.centroid
+                zone_pack_centers.append((float(c.x), float(c.y)))
+        else:
+            zone_pack_centers.append((0.0, 0.0))
+    placements, _order, rot_info = packing.pack_regions(
+        zone_pack_polys,
+        (w, h),
+        allow_rotate=True,
+        angle_step=5.0,
+        grid_step=config.PACK_GRID_STEP,
+        fixed_angles=None,
+        fixed_centers=zone_pack_centers,
+        max_bins=2,
+        try_heuristics=True,
+        two_pass=True,
+        preferred_indices=None,
+        use_gap_only=False,
+    )
+    placement_bin = [int(info.get("bin", -1)) for info in rot_info]
+    placement_bin_by_zid = {
+        zid: placement_bin[idx]
+        for idx, zid in enumerate(zone_order)
+        if idx < len(placement_bin)
+    }
+    zone_shift: Dict[int, tuple[float, float]] = {}
+    zone_rot: Dict[int, float] = {}
+    zone_center: Dict[int, tuple[float, float]] = {}
+    for idx, zid in enumerate(zone_order):
+        if idx >= len(placements):
+            continue
+        dx, dy, _, _, _ = placements[idx]
+        zone_shift[zid] = (float(dx), float(dy))
+        info = rot_info[idx] if idx < len(rot_info) else {"angle": 0.0, "cx": 0.0, "cy": 0.0}
+        zone_rot[zid] = float(info.get("angle", 0.0))
+        zone_center[zid] = (float(info.get("cx", 0.0)), float(info.get("cy", 0.0)))
+    colors_raw = payload.get("region_colors") or []
+    colors = []
+    for i in range(len(polys)):
+        c = colors_raw[i] if i < len(colors_raw) else None
+        colors.append(_color_to_bgr(c))
+    packing.write_pack_svg(
+        polys,
+        zone_id,
+        zone_order,
+        zone_polys,
+        placements,
+        (w, h),
+        colors,
+        rot_info,
+        placement_bin=placement_bin,
+        placement_bin_by_zid=placement_bin_by_zid,
+        page_idx=0,
+        out_path=PACKED_ZONE_SCENE_SVG,
+    )
+    packing.write_pack_svg(
+        polys,
+        zone_id,
+        zone_order,
+        zone_polys,
+        placements,
+        (w, h),
+        colors,
+        rot_info,
+        placement_bin=placement_bin,
+        placement_bin_by_zid=placement_bin_by_zid,
+        page_idx=1,
+        out_path=PACKED_ZONE_SCENE_SVG_PAGE2,
+    )
+    return jsonify(
+        {
+            "ok": True,
+            "packed_svg": PACKED_ZONE_SCENE_SVG.read_text(encoding="utf-8"),
+            "packed_svg_page2": PACKED_ZONE_SCENE_SVG_PAGE2.read_text(encoding="utf-8"),
+            "zone_shift": zone_shift,
+            "zone_rot": zone_rot,
+            "zone_center": zone_center,
+            "placement_bin": placement_bin_by_zid,
+        }
+    )
 
 
 @app.get("/api/source_zone_click")
