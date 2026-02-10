@@ -22,6 +22,7 @@ STATE_SVG = ROOT / "ui_state.svg"
 PACKED_LABELS_JSON = ROOT / "packed_labels.json"
 ZONE_LABELS_JSON = ROOT / "zone_labels.json"
 SCENE_JSON = ROOT / "scene_cache.json"
+SOURCE_ZONE_CLICK_JSON = ROOT / "soure_zone_click.json"
 SVG_PATH = ROOT / "convoi.svg"
 SVG_BACKUP = ROOT / "convoi_backup.svg"
 EXPORT_DIR = ROOT / "export"
@@ -174,6 +175,39 @@ def api_save_packed_labels():
         data[str(key)] = val
     PACKED_LABELS_JSON.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     return jsonify({"ok": True})
+
+
+@app.get("/api/source_zone_click")
+def api_get_source_zone_click():
+    if SOURCE_ZONE_CLICK_JSON.exists():
+        try:
+            data = json.loads(SOURCE_ZONE_CLICK_JSON.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return jsonify({"clicks": data})
+            if isinstance(data, dict):
+                return jsonify({"clicks": data.get("clicks", [])})
+        except Exception:
+            return jsonify({"clicks": []})
+    return jsonify({"clicks": []})
+
+
+@app.post("/api/source_zone_click")
+def api_save_source_zone_click():
+    payload: Any = request.get_json(silent=True) or []
+    clicks = payload if isinstance(payload, list) else payload.get("clicks", [])
+    cleaned = []
+    for item in clicks or []:
+        if not isinstance(item, dict):
+            continue
+        x = item.get("x")
+        y = item.get("y")
+        if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+            if math.isfinite(x) and math.isfinite(y):
+                cleaned.append({"x": float(x), "y": float(y)})
+    SOURCE_ZONE_CLICK_JSON.write_text(
+        json.dumps({"clicks": cleaned}, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    return jsonify({"ok": True, "count": len(cleaned)})
 
 
 @app.post("/api/export")

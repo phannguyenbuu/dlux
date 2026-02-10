@@ -605,6 +605,17 @@ const buildRegionAdjacency = (polys, eps = 0.5) => {
   return adj.map((s) => Array.from(s));
 };
 
+const buildRegionAdjacencyMulti = (polys, epsList) => {
+  const merged = Array.from({ length: polys.length }, () => new Set());
+  (epsList || []).forEach((eps) => {
+    const adj = buildRegionAdjacency(polys, eps);
+    adj.forEach((neighbors, rid) => {
+      neighbors.forEach((nb) => merged[rid].add(nb));
+    });
+  });
+  return merged.map((s) => Array.from(s));
+};
+
 const buildZoneBoundaries = (polys, zoneId, snap = 0) => {
   const zones = new Map();
   polys.forEach((pts, rid) => {
@@ -747,6 +758,25 @@ const buildZoneBoundaries = (polys, zoneId, snap = 0) => {
   return zoneBoundaries;
 };
 
+const polyAreaAndCentroid = (poly) => {
+  if (!poly || poly.length < 3) return { area: 0, cx: 0, cy: 0 };
+  let area = 0;
+  let cx = 0;
+  let cy = 0;
+  const n = poly.length;
+  for (let i = 0; i < n; i++) {
+    const [x0, y0] = poly[i];
+    const [x1, y1] = poly[(i + 1) % n];
+    const cross = x0 * y1 - x1 * y0;
+    area += cross;
+    cx += (x0 + x1) * cross;
+    cy += (y0 + y1) * cross;
+  }
+  area *= 0.5;
+  if (Math.abs(area) < 1e-6) return { area: 0, cx: poly[0][0], cy: poly[0][1] };
+  return { area, cx: cx / (6 * area), cy: cy / (6 * area) };
+};
+
 export default function App() {
   const [snap, setSnap] = useState(1);
   const [scene, setScene] = useState(null);
@@ -798,10 +828,12 @@ export default function App() {
   const [zoneScale, setZoneScale] = useState(1);
   const [zonePos, setZonePos] = useState({ x: 0, y: 0 });
   const [zoneStageSize, setZoneStageSize] = useState({ w: 300, h: 200 });
+  const zoneClickCacheRef = useRef([]);
   const [leftTab, setLeftTab] = useState("source");
+  const [rightTab, setRightTab] = useState("packed");
   const neighborSnap = 0.5;
   const regionAdj = useMemo(
-    () => buildRegionAdjacency((zoneScene || scene)?.regions || [], neighborSnap),
+    () => buildRegionAdjacencyMulti((zoneScene || scene)?.regions || [], [neighborSnap, 2]),
     [zoneScene, scene]
   );
   const [autoFit, setAutoFit] = useState(true);
@@ -836,6 +868,7 @@ export default function App() {
   const [overlayItems, setOverlayItems] = useState([]);
   const [selectedOverlayId, setSelectedOverlayId] = useState(null);
   const [overlayFill, setOverlayFill] = useState("#000000");
+  const [zoneClickLogs, setZoneClickLogs] = useState([]);
 
   const simZoneIds = useMemo(() => {
     const ids = Object.keys(scene?.zone_boundaries || {});
@@ -880,6 +913,27 @@ export default function App() {
         scene?.zone_label_map?.[parseInt(simActiveZid, 10)] ??
         simActiveZid
       : "";
+  const zoneLabelCenters = useMemo(() => {
+    const source = zoneScene || scene;
+    const centers = {};
+    const boundaries = source?.zone_boundaries || {};
+    Object.entries(boundaries).forEach(([zid, paths]) => {
+      if (!paths || !paths.length) return;
+      let best = null;
+      for (const p of paths) {
+        if (!p || p.length < 3) continue;
+        const { area, cx, cy } = polyAreaAndCentroid(p);
+        const absArea = Math.abs(area);
+        if (!best || absArea > best.absArea) {
+          best = { absArea, cx, cy };
+        }
+      }
+      if (best && Number.isFinite(best.cx) && Number.isFinite(best.cy)) {
+        centers[String(zid)] = { x: best.cx, y: best.cy };
+      }
+    });
+    return centers;
+  }, [zoneScene, scene]);
   const simLocalFor = (idx) => {
     if (idx == null || idx < 0) return 0;
     const t = simProgress * simTotalSeconds - idx * simPerZone;
@@ -1327,10 +1381,24 @@ export default function App() {
         throw new Error(`scene fetch failed: ${res.status}`);
       }
       const data = await res.json();
-        setScene(data);
-        if (updateZone) {
-          setZoneScene(data);
+      setScene(data);
+      if (updateZone) {
+        let zoneData = data;
+        try {
+          const clickRes = await fetch("/api/source_zone_click");
+          if (clickRes.ok) {
+            const clickJson = await clickRes.json();
+            const clicks = normalizeClickCache(clickJson);
+            zoneClickCacheRef.current = clicks;
+            if (clicks.length) {
+              zoneData = applyZoneClickCache(zoneData, clicks);
+            }
+          }
+        } catch {
+          zoneClickCacheRef.current = [];
         }
+        setZoneScene(zoneData);
+      }
       logPackedPreview(data);
       if (typeof data.draw_scale === "number") {
         setDrawScale(data.draw_scale);
@@ -1996,13 +2064,103 @@ export default function App() {
     return target;
   };
 
-  const handleZoneRegionClick = (rid) => {
-    const source = zoneScene || scene;
-    if (!source?.regions || !source?.zone_id) return;
-    if (rid == null || rid < 0 || rid >= source.regions.length) return;
+  const getZoneAlias = (zid, source) => {
+    if (!source) return String(zid);
+    const mapped =
+      source.zone_label_map?.[zid] ??
+      source.zone_label_map?.[parseInt(zid, 10)];
+    if (mapped != null) return String(mapped);
+    const label =
+      source.zone_labels?.[zid]?.label ??
+      source.zone_labels?.[parseInt(zid, 10)]?.label;
+    if (label != null) return String(label);
+    return String(zid);
+  };
+
+  const packedBoxData = useMemo(() => {
+    if (!scene?.zone_pack_polys || !scene?.zone_order || !scene?.placements) return [];
+    const out = [];
+    const zoneOrder = scene.zone_order || [];
+    zoneOrder.forEach((zid, idx) => {
+      const poly = scene.zone_pack_polys?.[idx];
+      const placement = scene.placements?.[idx];
+      if (!poly || !poly.length || !placement) return;
+      const dx = placement?.[0] ?? -1;
+      const dy = placement?.[1] ?? -1;
+      const bw = placement?.[2] ?? 0;
+      const bh = placement?.[3] ?? 0;
+      if (bw <= 0 || bh <= 0) return;
+      const info = scene.rot_info?.[idx] || {};
+      const ang = info?.angle ?? 0;
+      const cx = info?.cx ?? 0;
+      const cy = info?.cy ?? 0;
+      const rpts = poly.map((p) => rotatePt(p, ang, cx, cy));
+      const bb = bboxFromPts(rpts);
+      if (!bb) return;
+      const x = dx + bb.minx;
+      const y = dy + bb.miny;
+      const bin = scene?.placement_bin?.[zid] ?? scene?.placement_bin?.[parseInt(zid, 10)];
+      const page = bin === 1 ? 1 : 0;
+      const xOffset = page === 1 ? (scene?.canvas?.w || 0) + 40 : 0;
+      out.push({
+        zid: String(zid),
+        label: getZoneAlias(zid, scene),
+        minx: x,
+        miny: y,
+        maxx: x + bw,
+        maxy: y + bh,
+        xOffset,
+      });
+    });
+    return out;
+  }, [scene]);
+
+  const findRegionAtPoint = (regions, pt) => {
+    if (!regions || !pt) return -1;
+    for (let i = 0; i < regions.length; i++) {
+      if (pointInPoly([pt.x, pt.y], regions[i])) return i;
+    }
+    return -1;
+  };
+
+  const normalizeClickCache = (payload) => {
+    if (Array.isArray(payload)) return payload;
+    if (payload && Array.isArray(payload.clicks)) return payload.clicks;
+    return [];
+  };
+
+  const getZoneStageWorldPoint = (evt) => {
+    const stage = evt?.target?.getStage?.() || zoneRef.current;
+    if (!stage) return null;
+    const pointer = stage.getPointerPosition?.();
+    if (!pointer) return null;
+    const scale = stage.scaleX?.() || mainViewScale || 1;
+    const x = (pointer.x - stage.x()) / scale;
+    const y = (pointer.y - stage.y()) / scale;
+    return { x, y };
+  };
+
+  const saveZoneClickCache = async (pt) => {
+    if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return;
+    const next = [...zoneClickCacheRef.current, { x: pt.x, y: pt.y }];
+    zoneClickCacheRef.current = next;
+    try {
+      await fetch("/api/source_zone_click", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ clicks: next }),
+      });
+    } catch {
+      // ignore cache write errors
+    }
+  };
+
+  const applyZoneDetachAttach = (source, rid, adj, cursorMap) => {
+    if (!source?.regions || !source?.zone_id) return { source, changed: false };
+    if (rid == null || rid < 0 || rid >= source.regions.length) return { source, changed: false };
     const currentZid = source.zone_id[rid];
-    const neighbors = regionAdj?.[rid] || [];
-    if (!neighbors.length) return;
+    const neighbors = adj?.[rid] || [];
+    if (!neighbors.length) return { source, changed: false };
     const neighborZids = [];
     const seen = new Set();
     for (const nb of neighbors) {
@@ -2014,17 +2172,105 @@ export default function App() {
       seen.add(key);
       neighborZids.push(zid);
     }
-    if (!neighborZids.length) return;
+    if (!neighborZids.length) return { source, changed: false };
     neighborZids.sort((a, b) => Number(a) - Number(b));
-    const cursor = regionNeighborCursorRef.current[rid] || 0;
+    const cursor = cursorMap[rid] || 0;
     const targetZid = neighborZids[cursor % neighborZids.length];
-    regionNeighborCursorRef.current[rid] = (cursor + 1) % neighborZids.length;
-
+    cursorMap[rid] = (cursor + 1) % neighborZids.length;
     const nextZoneId = source.zone_id.slice();
     nextZoneId[rid] = targetZid;
     const nextBoundaries = buildZoneBoundaries(source.regions, nextZoneId, 0);
-    setZoneScene({ ...source, zone_id: nextZoneId, zone_boundaries: nextBoundaries });
-    setSelectedZoneId(String(targetZid));
+    return {
+      source: { ...source, zone_id: nextZoneId, zone_boundaries: nextBoundaries },
+      changed: true,
+      targetZid,
+      currentZid,
+      neighborZids,
+    };
+  };
+
+  const applyZoneClickCache = (base, clicks) => {
+    if (!base?.regions || !base?.zone_id || !clicks?.length) return base;
+    const adj = buildRegionAdjacencyMulti(base.regions || [], [neighborSnap, 2]);
+    const cursorMap = {};
+    let nextSource = base;
+    let lastTarget = null;
+    clicks.forEach((pt, idx) => {
+      if (!pt || !Number.isFinite(pt.x) || !Number.isFinite(pt.y)) return;
+      const rid = findRegionAtPoint(nextSource.regions, pt);
+      if (rid < 0) {
+        console.log(`[zone] replay ${idx} miss x=${pt.x} y=${pt.y}`);
+        return;
+      }
+      const res = applyZoneDetachAttach(nextSource, rid, adj, cursorMap);
+      if (!res.changed) return;
+      const currentAlias = getZoneAlias(res.currentZid, nextSource);
+      const neighborAliases = (res.neighborZids || []).map((zid) =>
+        getZoneAlias(zid, nextSource)
+      );
+      console.log(
+        `[zone] replay ${idx} region=${rid} current=${currentAlias} neighbors=${neighborAliases.join(
+          ", "
+        )}`
+      );
+      const targetAlias = getZoneAlias(res.targetZid, nextSource);
+      console.log(`[zone] replay ${idx} region=${rid} attach=${targetAlias}`);
+      nextSource = res.source;
+      lastTarget = res.targetZid;
+    });
+    if (lastTarget != null) setSelectedZoneId(String(lastTarget));
+    return nextSource;
+  };
+
+  const renderLeftDebug = () => (
+    <div className="left-debug">
+      <div className="zone-count">
+        Zones: {scene?.zone_id ? Math.max(...scene.zone_id) + 1 : 0}
+      </div>
+      <div className="zone-count">
+        Debug:
+        {scene?.debug
+          ? ` raw=${scene.debug.polygons_raw || 0} kept=${scene.debug.polygons_final || 0} small=${scene.debug.polygons_removed_small || 0} largest=${scene.debug.polygons_removed_largest || 0} tri_keep=${scene.debug.tri_kept || 0} tri_small=${scene.debug.tri_removed_small || 0} tri_out=${scene.debug.tri_removed_outside || 0} packed=${scene.debug.packed_placed || 0}/${scene.debug.zones_total || 0}`
+          : " n/a"}
+      </div>
+      <div className="zone-count">
+        ZonePoly:
+        {scene?.debug
+          ? ` empty=${(scene.debug.zones_empty || []).length} hull=${(scene.debug.zones_convex_hull || []).length}`
+          : " n/a"}
+      </div>
+      {zoneClickLogs.slice(-4).map((line, idx) => (
+        <div className="zone-count" key={`zlog-${idx}`}>
+          {line}
+        </div>
+      ))}
+    </div>
+  );
+
+  const handleZoneRegionClick = (rid, evt) => {
+    const source = zoneScene || scene;
+    if (!source) return;
+    const clickPt = getZoneStageWorldPoint(evt);
+    if (clickPt) saveZoneClickCache(clickPt);
+    const adjAll = buildRegionAdjacencyMulti(source.regions || [], [neighborSnap, 2]);
+    const res = applyZoneDetachAttach(
+      source,
+      rid,
+      adjAll,
+      regionNeighborCursorRef.current
+    );
+    if (!res.changed) return;
+    const currentAlias = getZoneAlias(res.currentZid, source);
+    const neighborAliases = (res.neighborZids || []).map((zid) => getZoneAlias(zid, source));
+    const clickLine = `Click: ${currentAlias} -> [${neighborAliases.join(", ")}]`;
+    setZoneClickLogs((logs) => [...logs.slice(-20), clickLine]);
+    console.log(
+      `[zone] region=${rid} current=${currentAlias} neighbors=${neighborAliases.join(", ")}`
+    );
+    const targetAlias = getZoneAlias(res.targetZid, source);
+    console.log(`[zone] region=${rid} attach=${targetAlias}`);
+    setZoneScene(res.source);
+    setSelectedZoneId(String(res.targetZid));
   };
 
   const transformOverlayToPacked = (item) => {
@@ -2932,23 +3178,7 @@ export default function App() {
             </Layer>
               </Stage>
               {sceneLoading ? <div className="loading-overlay">Loading...</div> : null}
-              <div className="left-debug">
-                <div className="zone-count">
-                  Zones: {scene?.zone_id ? Math.max(...scene.zone_id) + 1 : 0}
-                </div>
-                <div className="zone-count">
-                  Debug:
-                  {scene?.debug
-                    ? ` raw=${scene.debug.polygons_raw || 0} kept=${scene.debug.polygons_final || 0} small=${scene.debug.polygons_removed_small || 0} largest=${scene.debug.polygons_removed_largest || 0} tri_keep=${scene.debug.tri_kept || 0} tri_small=${scene.debug.tri_removed_small || 0} tri_out=${scene.debug.tri_removed_outside || 0} packed=${scene.debug.packed_placed || 0}/${scene.debug.zones_total || 0}`
-                    : " n/a"}
-                </div>
-                <div className="zone-count">
-                  ZonePoly:
-                  {scene?.debug
-                    ? ` empty=${(scene.debug.zones_empty || []).length} hull=${(scene.debug.zones_convex_hull || []).length}`
-                    : " n/a"}
-                </div>
-              </div>
+              {renderLeftDebug()}
             </div>
           )}
 
@@ -3020,6 +3250,7 @@ export default function App() {
                 </Stage>
               ) : null}
               {sceneLoading ? <div className="loading-overlay">Loading...</div> : null}
+              {renderLeftDebug()}
             </div>
           )}
 
@@ -3079,8 +3310,8 @@ export default function App() {
                         closed
                         fill={(zoneScene || scene).region_colors[idx]}
                         strokeScaleEnabled={false}
-                        onClick={() => handleZoneRegionClick(idx)}
-                        onTap={() => handleZoneRegionClick(idx)}
+                        onClick={(e) => handleZoneRegionClick(idx, e)}
+                        onTap={(e) => handleZoneRegionClick(idx, e)}
                       />
                     ))
                   : null}
@@ -3113,7 +3344,7 @@ export default function App() {
                           key={`zb2-${zid}-${i}`}
                           points={toPoints(p)}
                           stroke={String(zid) === String(selectedZoneId) ? "#ff3b30" : "#f5f6ff"}
-                          strokeWidth={String(zid) === String(selectedZoneId) ? 3 : 1}
+                          strokeWidth={String(zid) === String(selectedZoneId) ? 6 : 2}
                           strokeScaleEnabled={false}
                         />
                       ))
@@ -3121,6 +3352,9 @@ export default function App() {
                   </Layer>
                   <Layer name="zone-label" visible={showLabels}>
                     {Object.entries((zoneScene || scene).zone_labels || {}).map(([zid, lbl]) => {
+                      const center = zoneLabelCenters[String(zid)];
+                      const lx = center?.x ?? lbl.x;
+                      const ly = center?.y ?? lbl.y;
                       const selectedShuffle =
                         (zoneScene || scene)?.zone_label_map?.[selectedZoneId] ??
                         (zoneScene || scene)?.zone_label_map?.[parseInt(selectedZoneId, 10)];
@@ -3131,8 +3365,8 @@ export default function App() {
                         return (
                           <Text
                             key={`zl-${zid}`}
-                            x={lbl.x}
-                            y={lbl.y}
+                            x={lx}
+                            y={ly}
                             text={`${lbl.label}`}
                             fill={isSelected ? "#ff3b30" : "#ffffff"}
                             fontSize={size}
@@ -3162,13 +3396,30 @@ export default function App() {
                 </Stage>
               ) : null}
               {sceneLoading ? <div className="loading-overlay">Loading...</div> : null}
+              {renderLeftDebug()}
             </div>
           )}
         </div>
         <div className="right">
+          <div className="panel view-tabs">
+            <button
+              className={rightTab === "packed" ? "active" : ""}
+              onClick={() => setRightTab("packed")}
+            >
+              Packed
+            </button>
+            <button
+              className={rightTab === "box" ? "active" : ""}
+              onClick={() => setRightTab("box")}
+            >
+              Box
+            </button>
+          </div>
           <div className={`preview region-stage ${sceneLoading ? "is-loading" : ""}`} ref={regionWrapRef} style={{ height: '100%'}}>
             <div className="preview-header">
-              <div className="preview-title">Packed (Konva)</div>
+              <div className="preview-title">
+                {rightTab === "packed" ? "Packed (Konva)" : "Packed (Box)"}
+              </div>
               <div className="preview-controls">
                 <label className="checkbox">
                   <input
@@ -3231,7 +3482,7 @@ export default function App() {
                   onClick={() =>
                     downloadStage(
                       regionRef,
-                      "packed-konva.svg",
+                      rightTab === "box" ? "packed-bbox-konva.svg" : "packed-konva.svg",
                       scene?.canvas ? { w: scene.canvas.w, h: scene.canvas.h } : null
                     )
                   }
@@ -3267,6 +3518,7 @@ export default function App() {
                     </>
                   ) : null}
                 </Layer>
+                {rightTab === "packed" ? (
                 <Layer name="packed-image" visible={showImages}>
                   <>
                     <Group
@@ -3321,6 +3573,8 @@ export default function App() {
                     </Group>
                   </>
                 </Layer>
+                ) : null}
+                {rightTab === "packed" ? (
                 <Layer name="packed-overlay">
                   {overlayItems.map((item) => {
                     if (!item?.img || item.zid == null) return null;
@@ -3348,6 +3602,8 @@ export default function App() {
                     );
                   })}
                 </Layer>
+                ) : null}
+                {rightTab === "packed" ? (
                 <Layer name="packed-stroke" visible={showStroke}>
                   {Object.entries(scene.zone_boundaries || {}).flatMap(([zid, paths]) => {
                     const bin =
@@ -3375,6 +3631,8 @@ export default function App() {
                       });
                   })}
                 </Layer>
+                ) : null}
+                {rightTab === "packed" ? (
                 <Layer name="packed-hit">
                   {Object.entries(scene.zone_boundaries || {}).flatMap(([zid, paths]) => {
                     const bin =
@@ -3398,9 +3656,11 @@ export default function App() {
                           onClick={() => setSelectedZoneId(String(zid))}
                         />
                       );
-                    });
+                      });
                   })}
                 </Layer>
+                ) : null}
+                {rightTab === "packed" ? (
                 <Layer name="packed-label" visible={showLabels}>
                   <Group>
                     {packedLabels.map((lbl) => {
@@ -3454,6 +3714,47 @@ export default function App() {
                     })}
                   </Group>
                 </Layer>
+                ) : null}
+                {rightTab === "box" ? (
+                <Layer name="packed-bbox">
+                  {packedBoxData.map((box) => {
+                    const w = Math.max(0, box.maxx - box.minx);
+                    const h = Math.max(0, box.maxy - box.miny);
+                    const size = Math.max(10 / regionScale, 6 / regionScale);
+                    const metrics = measureText(box.label, size, labelFontFamily);
+                    return (
+                      <React.Fragment key={`pb-${box.zid}`}>
+                        {showStroke ? (
+                          <Rect
+                            x={box.minx + box.xOffset}
+                            y={box.miny}
+                            width={w}
+                            height={h}
+                            stroke="#00ff7f"
+                            strokeWidth={1 / regionScale}
+                            listening={false}
+                          />
+                        ) : null}
+                        {showLabels ? (
+                          <Text
+                            x={box.minx + box.xOffset + 2 / regionScale}
+                            y={box.miny + 2 / regionScale}
+                            text={`${box.label}`}
+                            fill="#00ff7f"
+                            fontSize={size}
+                            fontFamily={labelFontFamily}
+                            align="left"
+                            verticalAlign="top"
+                            offsetX={0}
+                            offsetY={0}
+                            listening={false}
+                          />
+                        ) : null}
+                      </React.Fragment>
+                    );
+                  })}
+                </Layer>
+                ) : null}
               </Stage>
             ) : null}
             {sceneLoading ? <div className="loading-overlay">Loading...</div> : null}
